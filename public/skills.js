@@ -1,44 +1,27 @@
 (() => {
   const panel = document.createElement('article');
-  panel.className = 'decision';
-  panel.style.marginTop = '16px';
+  panel.className = 'decision'; panel.style.marginTop = '16px';
   document.querySelector('#game')?.appendChild(panel);
   const descriptions = {
-    '變異工程師': '每局 3 次：使一個樣本危險係數 +4，且收容者不能獲得任何減傷。',
-    '黑市走私商': '每局 3 次：標記一個樣本；若它被收容，將在 0～2 回合後使失控指數 +1。',
-    '內部破壞者': '每局 1 次：使本輪所有尚未售出的樣本都不能獲得減傷。',
-    '假情報員': '每局 3 次：在回合結束後，預先指定下回合一個市場；公開時會直接隱藏其種類與編號。',
-    '失控宿主': '每局 2 次：鎖定一個樣本；收容者無法用任何連線規則消除它。',
+    '變異工程師':'每局 5 次：選一張樣本 +6，且不能減傷。','黑市走私商':'每局 3 次：從下回合預覽的兩張樣本中秘密標記一張。','內部破壞者':'每局 2 次：第一小回合啟用；若未全數收容，剩餘樣本 +20 且不可減傷、不可消除。','假情報員':'每局 4 次：預先偽造下回合一個市場的種類與編號。','失控宿主':'每局 3 次：秘密鎖定一張樣本；收容後才會揭露不可消除。',
   };
-  let identity = null;
-  let lastState = null;
-  let previousPhase = '';
-  async function getIdentity() {
-    const playerId = localStorage.getItem('pandemic-player-id');
-    if (!playerId) return null;
-    const response = await fetch('/api/identity', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({playerId}) });
-    return response.ok ? response.json() : null;
+  let identity=null,lastState=null,previousPhase='';
+  async function getIdentity(){const playerId=localStorage.getItem('pandemic-player-id');if(!playerId)return null;const r=await fetch('/api/identity',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({playerId})});return r.ok?r.json():null;}
+  async function render(){
+    const phase=lastState?.phase;if(phase==='lobby'){panel.hidden=true;previousPhase=phase;return;}
+    if(phase!==previousPhase){if(phase==='identity'||phase==='between')identity=null;previousPhase=phase;}
+    if(!identity)identity=await getIdentity();
+    const active=phase==='active'?lastState.markets.filter(m=>m.status==='active'):[];
+    if(!identity||identity.faction!=='evil'){panel.hidden=true;return;}
+    let choices='';
+    if(identity.role==='假情報員'&&phase==='between') choices=identity.pendingHiddenSlot?`<p class="waiting">已偽造下回合市場 ${String.fromCharCode(64+identity.pendingHiddenSlot)}。</p>`:[1,2,3,4,5].map(slot=>`<button class="choice" data-market="${slot}">偽造下回合市場 ${String.fromCharCode(64+slot)}</button>`).join('');
+    else if(identity.role==='黑市走私商'&&phase==='between') choices=identity.pendingSmuggledSampleId?'<p class="waiting">已秘密標記一張下回合樣本。</p>':identity.smugglerPreview.map(s=>`<button class="choice" data-market="${s.id}">標記：${s.typeLabel} ${s.code} <span class="risk">−${s.risk}</span></button>`).join('')||'<p class="waiting">卡池已無下一回合樣本。</p>';
+    else if(identity.role==='內部破壞者'&&phase==='active'&&active.length&&lastState.markets.every(m=>m.pot===0)) choices=`<button class="choice" data-market="${active[0].id}">啟用本回合內部破壞</button>`;
+    else if(['假情報員','黑市走私商','內部破壞者'].includes(identity.role)) {panel.hidden=true;return;}
+    else if(active.length) choices=active.map(m=>`<button class="choice" data-market="${m.id}">對市場 ${String.fromCharCode(64+m.id)} 使用技能</button>`).join('');
+    else {panel.hidden=true;return;}
+    panel.hidden=false;panel.innerHTML=`<h3>隱密行動｜${identity.role}</h3><p>${descriptions[identity.role]}</p>${choices}`;
+    panel.querySelectorAll('[data-market]').forEach(button=>button.onclick=async()=>{const playerId=localStorage.getItem('pandemic-player-id');const r=await fetch('/api/skill',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({playerId,marketId:button.dataset.market})});if(!r.ok)alert((await r.json()).error||'技能未能使用');else{identity=await getIdentity();render();}});
   }
-  async function render() {
-    if (lastState?.phase === 'lobby') { panel.hidden = true; return; }
-    if (lastState?.phase !== previousPhase) {
-      if (lastState?.phase === 'identity') identity = null;
-      previousPhase = lastState?.phase;
-    }
-    if (!identity) identity = await getIdentity();
-    const active = lastState?.phase === 'active' ? lastState.markets.filter((market) => market.status === 'active') : [];
-    const isFakeSetup = identity?.role === '假情報員' && lastState?.phase === 'between';
-    const isFake = identity?.role === '假情報員';
-    if (!identity || identity.faction !== 'evil' || (isFake && !isFakeSetup) || (!isFake && !active.length)) { panel.hidden = true; return; }
-    panel.hidden = false;
-    const choices = isFakeSetup ? (identity.pendingHiddenSlot ? `<p class="waiting">已選擇下回合市場 ${String.fromCharCode(64 + identity.pendingHiddenSlot)}，等待主持人開市。</p>` : [1,2,3,4,5].map((slot) => `<button class="choice" data-market="${slot}">偽造下回合市場 ${String.fromCharCode(64 + slot)}</button>`).join('')) : active.map((market) => `<button class="choice" data-market="${market.id}">對市場 ${String.fromCharCode(64 + market.id)} 使用技能</button>`).join('');
-    panel.innerHTML = `<h3>隱密行動｜${identity.role}</h3><p>${descriptions[identity.role] || ''}</p>${choices}`;
-    panel.querySelectorAll('[data-market]').forEach((button) => { button.onclick = async () => {
-      const playerId = localStorage.getItem('pandemic-player-id');
-      const response = await fetch('/api/skill', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({playerId, marketId:button.dataset.market}) });
-      if (!response.ok) alert((await response.json()).error || '技能未能使用'); else { identity = await getIdentity(); render(); }
-    }; });
-  }
-  const events = new EventSource('/events');
-  events.onmessage = (event) => { lastState = JSON.parse(event.data); render(); };
+  const events=new EventSource('/events');events.onmessage=e=>{lastState=JSON.parse(e.data);render();};
 })();

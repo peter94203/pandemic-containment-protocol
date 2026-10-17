@@ -21,6 +21,7 @@ const state = {
   phase: 'lobby',
   markets: [],
   deck: [],
+  deckInitialized: false,
   submissions: {},
   outbreak: 0,
   result: null,
@@ -49,13 +50,14 @@ function buildDeck() {
   }))));
 }
 
-function ensureDeck(count) {
-  while (state.deck.length < count) state.deck.push(...buildDeck());
-}
-
 function drawSamples(count) {
-  ensureDeck(count);
-  return Array.from({ length: count }, () => state.deck.pop());
+  if (!state.deckInitialized) { state.deck = buildDeck(); state.deckInitialized = true; }
+  const drawCount = Math.min(count, state.deck.length);
+  return Array.from({ length: drawCount }, () => {
+    const sample = state.deck.pop();
+    if (sample.risk > 15 && Math.random() < 0.2) sample.naturalMutation = true;
+    return sample;
+  });
 }
 
 function eliminationCandidates(samples, role) {
@@ -110,11 +112,25 @@ function calculateScore(player) {
   return player.resources - totalRisk + bestElimination(player.samples, player.role).saved;
 }
 
+function endgameAdjustment(player) {
+  const elimination = bestElimination(player.samples, player.role);
+  const highRisk = player.samples.filter((sample) => sample.risk >= 20);
+  const lowSamplePenalty = player.samples.length < 2 ? -300 : 0;
+  const highRiskBonus = highRisk.length >= 3 ? highRisk.length * 6 : 0;
+  const eliminatedHighRiskBonus = highRisk.filter((sample) => elimination.ids.has(sample.id)).length * 4;
+  return {
+    lowSamplePenalty,
+    highRiskBonus,
+    eliminatedHighRiskBonus,
+    total: lowSamplePenalty + highRiskBonus + eliminatedHighRiskBonus,
+  };
+}
+
 function publicSample(sample, marketIsActive = false) {
-  if (marketIsActive && sample.hiddenType) {
-    return { ...sample, type: 'unknown', typeLabel: '未知', code: 'CLASSIFIED' };
-  }
-  return { ...sample };
+  const visible = { ...sample };
+  if (marketIsActive && visible.hostLock) { delete visible.locked; delete visible.hostLock; }
+  if (marketIsActive && visible.hiddenType) return { ...visible, type: 'unknown', typeLabel: '未知', code: 'CLASSIFIED' };
+  return visible;
 }
 
 function playerView(player) {
@@ -186,14 +202,21 @@ function hostState() {
 function identityView(playerId) {
   const player = state.players[playerId];
   if (!player) throw new Error('找不到玩家。');
-  return { role: player.role, faction: player.faction, confirmed: player.confirmed, pendingHiddenSlot: player.pendingHiddenSlot || null, allies: player.faction === 'evil' ? Object.values(state.players).filter((item) => item.faction === 'evil' && item.id !== playerId).map((item) => item.name) : [] };
+  return { role: player.role, faction: player.faction, confirmed: player.confirmed, pendingHiddenSlot: player.pendingHiddenSlot || null, pendingSmuggledSampleId: player.pendingSmuggledSampleId || null, smugglerPreview: player.nextSmugglerPreview || [], allies: player.faction === 'evil' ? Object.values(state.players).filter((item) => item.faction === 'evil' && item.id !== playerId).map((item) => item.name) : [] };
 }
 
 function previewView(playerId) {
   const player = state.players[playerId];
   if (!player) throw new Error('找不到玩家。');
-  if (player.role !== '流行病學專家' || !player.nextPreview) return { preview: null };
-  return { preview: { ...player.nextPreview } };
+  if (player.role !== '流行病學專家' || !player.nextPreview?.length) return { preview: [] };
+  return { preview: player.nextPreview.map((sample) => ({ ...sample })) };
+}
+
+function prepareNextRoundIntel() {
+  const nextRound = state.deck.slice(Math.max(0, state.deck.length - 5)).reverse();
+  Object.values(state.players).forEach((player) => {
+    player.nextSmugglerPreview = player.role === '黑市走私商' ? nextRound.slice(0, 2).map((sample) => ({ ...sample })) : null;
+  });
 }
 
 function broadcast() {
@@ -240,9 +263,13 @@ function startRound() {
     if (target) target.sample.hiddenType = true;
     player.pendingHiddenSlot = null;
   });
-  ensureDeck(5);
-  const nextRoundPreview = state.deck[state.deck.length - 1];
-  Object.values(state.players).forEach((player) => { player.nextPreview = player.role === '流行病學專家' ? { ...nextRoundPreview } : null; });
+  Object.values(state.players).filter((player) => player.role === '黑市走私商' && player.pendingSmuggledSampleId).forEach((player) => {
+    const target = state.markets.find((market) => market.sample.id === player.pendingSmuggledSampleId);
+    if (target) target.smuggledBy = player.id;
+    player.pendingSmuggledSampleId = null;
+  });
+  const nextRound = state.deck.slice(Math.max(0, state.deck.length - 5)).reverse();
+  Object.values(state.players).forEach((player) => { player.nextPreview = player.role === '流行病學專家' ? nextRound.slice(0, 3).map((sample) => ({ ...sample })) : null; });
   state.notice = `第 ${state.round} 輪開市：請決定五個市場中想收容的樣本。${dueEffects.length ? ` ${dueEffects.length} 項延遲異常已計入失控指數。` : ''}`;
   scheduleDecisionTimer();
 }
@@ -280,7 +307,7 @@ function resolveMarketPass() {
       if (winner.role === '疫苗開發員') {
         const elimination = bestElimination(winner.samples, winner.role);
         const completedGroups = elimination.groups.filter((group) => group.some((sample) => sample.id === market.sample.id)).length;
-        if (completedGroups) winner.resources += completedGroups * 4;
+        if (completedGroups) winner.resources += completedGroups * 5;
       }
       winner.resources += market.pot;
       if (winner.role === '緊急應變員' && !winner.roundCollected) winner.resources += 2;
@@ -288,24 +315,30 @@ function resolveMarketPass() {
       market.status = 'sold';
       market.winnerId = winnerId;
       outcomes.push(`${winner.name} 收容 ${market.sample.code}`);
-      if (market.smuggledBy) {
-        const delay = Math.floor(Math.random() * 3);
-        if (delay === 0) state.outbreak += 1;
-        else (state.delayedEffects ||= []).push({ sourceId: market.smuggledBy, amount: 1, dueRound: state.round + delay, description: '走私樣本流入造成的延遲失控' });
-      }
+      if (market.smuggledBy && firstPass) { state.outbreak += 1; state.players[market.smuggledBy].resources += 2; outcomes.push('走私標記在首輪成功流入，失控 +1'); }
     } else {
       Object.values(state.players).forEach((player) => { if (!(player.role === '生物安全官' && player.safetyUsedRound !== state.round)) { player.resources -= 1; } else player.safetyUsedRound = state.round; });
       market.pot += Object.keys(state.players).length;
       if (!market.outbreakCounted) { state.outbreak += 1; market.outbreakCounted = true; }
-      outcomes.push(`${market.sample.code} 無人收容，拒絕池累積至 ${market.pot}`);
+      if (market.sample.naturalMutation) state.outbreak += 1;
+      outcomes.push(`${market.sample.code} 無人收容，拒絕池累積至 ${market.pot}${market.sample.naturalMutation ? '；天然突變樣本額外造成失控' : ''}`);
     }
   }
+  if (state.sabotageArmedBy && firstPass && state.markets.some((market) => market.status === 'active')) {
+    state.markets.filter((market) => market.status === 'active').forEach((market) => {
+      market.sample.risk += 20; market.sample.baseRisk += 20; market.sample.noReduction = true; market.sample.locked = true; market.sample.sabotaged = true;
+    });
+    outcomes.push('內部破壞生效：未收容樣本 +20，且不可減傷、不可消除');
+  }
+  if (firstPass) state.sabotageArmedBy = null;
   state.submissions = {};
   if (state.markets.every((market) => market.status === 'sold')) {
     if (firstPass) state.outbreak = Math.max(0, state.outbreak - 2);
     const evilWins = state.markets.filter((market) => state.players[market.winnerId].faction === 'evil').length;
     if (evilWins >= 2) state.outbreak += 2;
+    if (state.deck.length === 0) { state.phase = 'between'; finalizeGame(); return; }
     state.phase = 'between';
+    prepareNextRoundIntel();
     state.notice = `第 ${state.round} 輪結束：${outcomes.join('；')}。`;
   } else {
     state.notice = `仍有樣本未售出：${outcomes.join('；')}。請重新決策。`;
@@ -329,10 +362,10 @@ function applyCollectionEffects(player, sample) {
   // 收容時固定危險係數；被變異或破壞的樣本不能再減傷。
   if (sample.noReduction) return;
   let reduction = 0;
-  if ((player.role === '病毒專家' && sample.type === 'virus') || (player.role === '細菌專家' && sample.type === 'bacteria') || (player.role === '寄生蟲專家' && sample.type === 'parasite')) reduction += 4;
+  if ((player.role === '病毒專家' && sample.type === 'virus') || (player.role === '細菌專家' && sample.type === 'bacteria') || (player.role === '寄生蟲專家' && sample.type === 'parasite')) reduction += 5;
   if (player.role === '免疫學家') reduction += 2;
-  if (player.role === '病原體獵人' && sample.risk >= 15) reduction += 4;
-  if (player.role === '研發天才' && Math.random() < 0.15) { sample.risk = 0; sample.reductionNote = '研發天才：風險歸零'; return; }
+  if (player.role === '病原體獵人' && sample.risk > 15) reduction += 5;
+  if (player.role === '研發天才' && Math.random() < 0.2) { sample.risk = 0; sample.reductionNote = '研發天才：風險歸零'; return; }
   if (reduction) { sample.risk = Math.max(0, sample.risk - reduction); sample.reductionNote = `角色減傷 −${reduction}`; }
 }
 
@@ -345,7 +378,7 @@ function reportPlayer(reporterId, targetId) {
   reporter.reportUsedRound = state.round; target.reports += 1;
   if (target.reports >= 9) {
     target.revealed = true;
-    const change = target.faction === 'evil' ? -2 : 2;
+    const change = target.faction === 'evil' ? -2 : 3;
     state.outbreak += change;
     state.revealAnnouncement = `舉報門檻達成：${target.name} 已公開為${target.faction === 'evil' ? '反收容派' : '收容協議研究員'}（${target.role}）；失控指數 ${change > 0 ? '+' : ''}${change}。`;
     state.notice = state.revealAnnouncement;
@@ -374,8 +407,19 @@ function useSkill(playerId, marketId) {
     if (!Number.isInteger(slot) || slot < 1 || slot > 5) throw new Error('請選擇下回合的 A～E 市場。');
     if (player.pendingHiddenSlot) throw new Error('你已預先偽造一個下回合市場，請等待下一回合開市。');
     player.skillUses = player.skillUses || 0;
-    if (player.skillUses >= 3) throw new Error('技能次數已用完。');
+    if (player.skillUses >= 4) throw new Error('技能次數已用完。');
     player.pendingHiddenSlot = slot;
+    player.skillUses += 1;
+    state.notice = '市場偵測到異常操作。';
+    return;
+  }
+  if (player.role === '黑市走私商' && state.phase === 'between') {
+    const targetId = String(marketId || '');
+    if (!player.nextSmugglerPreview?.some((sample) => sample.id === targetId)) throw new Error('請從你預覽到的兩張下回合樣本中選擇一張。');
+    if (player.pendingSmuggledSampleId) throw new Error('你已標記一張下回合樣本，請等待開市。');
+    player.skillUses = player.skillUses || 0;
+    if (player.skillUses >= 3) throw new Error('技能次數已用完。');
+    player.pendingSmuggledSampleId = targetId;
     player.skillUses += 1;
     state.notice = '市場偵測到異常操作。';
     return;
@@ -384,21 +428,24 @@ function useSkill(playerId, marketId) {
   const market = state.markets.find((item) => item.id === Number(marketId) && item.status === 'active');
   if (!market) throw new Error('這個市場已結算，請選擇仍在開放中的市場。');
   player.skillUses = player.skillUses || 0;
-  const limits = { '變異工程師': 3, '黑市走私商': 3, '內部破壞者': 1, '假情報員': 3, '失控宿主': 2 };
+  const limits = { '變異工程師': 5, '黑市走私商': 3, '內部破壞者': 2, '假情報員': 4, '失控宿主': 3 };
   if (player.skillUses >= limits[player.role]) throw new Error('技能次數已用完。');
-  if (player.role === '變異工程師') { market.sample.risk += 4; market.sample.baseRisk += 4; market.sample.noReduction = true; market.sample.reductionNote = '變異：禁止減傷'; }
-  if (player.role === '黑市走私商') market.smuggledBy = playerId;
-  if (player.role === '內部破壞者') state.markets.filter((item) => item.status === 'active').forEach((item) => { item.sample.noReduction = true; });
+  if (player.role === '變異工程師') { market.sample.risk += 6; market.sample.baseRisk += 6; market.sample.noReduction = true; market.sample.reductionNote = '變異：禁止減傷'; }
+  if (player.role === '黑市走私商') throw new Error('走私商請在本回合結束後標記下回合預覽樣本。');
+  if (player.role === '內部破壞者') {
+    if (!state.markets.every((item) => item.pot === 0)) throw new Error('內部破壞只能在第一小回合啟用。');
+    state.sabotageArmedBy = playerId;
+  }
   if (player.role === '假情報員') throw new Error('假情報員請在本回合結束後，預先偽造下回合的市場資訊。');
-  if (player.role === '失控宿主') market.sample.locked = true;
+  if (player.role === '失控宿主') { market.sample.locked = true; market.sample.hostLock = true; }
   player.skillUses += 1;
   state.notice = '市場偵測到異常操作。';
 }
 
 function resetGame() {
   clearDecisionTimer();
-  Object.values(state.players).forEach((player) => { player.resources = 8; player.samples = []; player.role = null; player.faction = 'good'; player.reports = 0; player.revealed = false; player.confirmed = false; player.skillUses = 0; player.pendingHiddenSlot = null; });
-  state.round = 0; state.phase = 'lobby'; state.markets = []; state.deck = []; state.submissions = {}; state.outbreak = 0; state.result = null; state.delayedEffects = [];
+  Object.values(state.players).forEach((player) => { player.resources = 8; player.samples = []; player.role = null; player.faction = 'good'; player.reports = 0; player.revealed = false; player.confirmed = false; player.skillUses = 0; player.pendingHiddenSlot = null; player.pendingSmuggledSampleId = null; player.nextSmugglerPreview = null; });
+  state.round = 0; state.phase = 'lobby'; state.markets = []; state.deck = []; state.deckInitialized = false; state.submissions = {}; state.outbreak = 0; state.result = null; state.delayedEffects = []; state.sabotageArmedBy = null;
   state.revealAnnouncement = null;
   state.notice = '收容協議已重置，等待主持人啟動。';
 }
@@ -432,16 +479,15 @@ function removePlayer(playerId) {
 function finalizeGame() {
   if (state.phase === 'active') throw new Error('請先完成目前所有市場。');
   if (state.phase === 'lobby' || state.phase === 'identity') throw new Error('遊戲尚未開始。');
-  const highRisk = Object.values(state.players).reduce((sum, player) => sum + player.samples.filter((sample) => !bestElimination(player.samples, player.role).ids.has(sample.id) && sample.risk >= 15).length, 0);
-  state.outbreak += highRisk;
   const winningFaction = state.outbreak >= 10 ? 'evil' : 'good';
   const scores = Object.values(state.players).map((player) => {
     let bonus = 0;
-    if (player.faction === 'good' && winningFaction === 'good') bonus = 10;
-    if (player.faction === 'evil' && winningFaction === 'evil') bonus = player.reports < 3 ? 50 : player.reports < 9 ? 15 : 10;
-    return { id: player.id, name: player.name, faction: player.faction, role: player.role, base: calculateScore(player), bonus, total: calculateScore(player) + bonus };
+    if (player.faction === 'good' && winningFaction === 'good') bonus = 20;
+    if (player.faction === 'evil' && winningFaction === 'evil') bonus = player.reports < 3 ? 50 : player.reports < 9 ? 15 : 5;
+    const adjustment = endgameAdjustment(player);
+    return { id: player.id, name: player.name, faction: player.faction, role: player.role, base: calculateScore(player), adjustment, bonus, total: calculateScore(player) + adjustment.total + bonus };
   }).sort((a,b) => b.total - a.total);
-  state.result = { winningFaction, highRisk, scores };
+  state.result = { winningFaction, scores };
   state.phase = 'final'; state.notice = winningFaction === 'evil' ? `失控指數 ${state.outbreak}：反收容派勝利。` : `失控指數 ${state.outbreak}：收容協議成功。`;
 }
 
@@ -503,4 +549,4 @@ const server = http.createServer(async (request, response) => {
 });
 
 if (require.main === module) server.listen(PORT, '0.0.0.0', () => console.log(`P.A.N.D.E.M.I.C. running on http://localhost:${PORT}`));
-module.exports = { state, calculateScore, startRound, submitActions, resetGame, bestElimination, confirmIdentity, finalizeGame, configureGame, useSkill, removePlayer, previewView, forceMarketPass };
+module.exports = { state, calculateScore, endgameAdjustment, startRound, submitActions, resetGame, bestElimination, confirmIdentity, finalizeGame, configureGame, useSkill, removePlayer, previewView, forceMarketPass };
