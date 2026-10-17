@@ -151,7 +151,7 @@ function assignRoles() {
     player.role = index < evilCount
       ? evilRoles[index % evilRoles.length]
       : goodRoles[(index - evilCount) % goodRoles.length];
-    player.reports = 0; player.revealed = false; player.reportUsedRound = 0; player.confirmed = false;
+    player.reports = 0; player.revealed = false; player.reportUsedRound = 0; player.confirmed = false; player.skillUses = 0;
   });
 }
 
@@ -295,8 +295,12 @@ function submitActions(playerId, actions) {
 }
 
 function useSkill(playerId, marketId) {
-  const player = state.players[playerId], market = state.markets.find((item) => item.id === Number(marketId) && item.status === 'active');
-  if (!player || player.faction !== 'evil' || !market) throw new Error('此技能目前無法使用。');
+  const player = state.players[playerId];
+  if (!player) throw new Error('找不到你的實驗室，請重新登入。');
+  if (state.phase !== 'active') throw new Error('技能只能在市場開放期間使用。');
+  if (player.faction !== 'evil') throw new Error('只有反收容派可使用隱密行動。');
+  const market = state.markets.find((item) => item.id === Number(marketId) && item.status === 'active');
+  if (!market) throw new Error('這個市場已結算，請選擇仍在開放中的市場。');
   player.skillUses = player.skillUses || 0;
   const limits = { '變異工程師': 3, '黑市走私商': 3, '內部破壞者': 1, '假情報員': 3, '失控宿主': 2 };
   if (player.skillUses >= limits[player.role]) throw new Error('技能次數已用完。');
@@ -310,7 +314,7 @@ function useSkill(playerId, marketId) {
 }
 
 function resetGame() {
-  Object.values(state.players).forEach((player) => { player.resources = 8; player.samples = []; player.role = null; player.faction = 'good'; player.reports = 0; player.revealed = false; player.confirmed = false; });
+  Object.values(state.players).forEach((player) => { player.resources = 8; player.samples = []; player.role = null; player.faction = 'good'; player.reports = 0; player.revealed = false; player.confirmed = false; player.skillUses = 0; });
   state.round = 0; state.phase = 'lobby'; state.markets = []; state.deck = []; state.submissions = {}; state.outbreak = 0; state.result = null; state.delayedEffects = [];
   state.notice = '收容協議已重置，等待主持人啟動。';
 }
@@ -325,6 +329,19 @@ function configureGame(evilCount, samplesPerType) {
   state.config.evilCount = count;
   state.config.samplesPerType = sampleCount;
   state.notice = `本場將分配 ${count} 名反收容派；病毒、細菌、寄生蟲各 ${sampleCount} 張。等待主持人發放身份。`;
+}
+
+function removePlayer(playerId) {
+  if (!['lobby', 'identity'].includes(state.phase)) throw new Error('市場已開啟，為避免結算錯誤，本回合不能移除玩家。');
+  const player = state.players[playerId];
+  if (!player) throw new Error('這位玩家已不存在。');
+  delete state.players[playerId];
+  if (state.phase === 'identity') {
+    const confirmed = Object.values(state.players).filter((item) => item.confirmed).length;
+    state.notice = `已移除 ${player.name}。已確認 ${confirmed}／${Object.keys(state.players).length} 位玩家身份。`;
+  } else {
+    state.notice = `已移除 ${player.name}。目前有 ${Object.keys(state.players).length} 位玩家等待加入。`;
+  }
 }
 
 function finalizeGame() {
@@ -383,6 +400,7 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'POST' && url.pathname === '/api/skill') { const { playerId, marketId } = await readBody(request); useSkill(playerId, marketId); broadcast(); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/start') { requireHost(request); startRound(); broadcast(); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/config') { requireHost(request); const { evilCount, samplesPerType } = await readBody(request); configureGame(evilCount, samplesPerType); broadcast(); return json(response, 200, publicState()); }
+    if (request.method === 'POST' && url.pathname === '/api/host/remove-player') { requireHost(request); const { playerId } = await readBody(request); removePlayer(playerId); broadcast(); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/end') { requireHost(request); if (state.phase === 'active') throw new Error('市場尚未全部售出。'); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/reset') { requireHost(request); resetGame(); broadcast(); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/finalize') { requireHost(request); finalizeGame(); broadcast(); return json(response, 200, publicState()); }
@@ -398,4 +416,4 @@ const server = http.createServer(async (request, response) => {
 });
 
 if (require.main === module) server.listen(PORT, '0.0.0.0', () => console.log(`P.A.N.D.E.M.I.C. running on http://localhost:${PORT}`));
-module.exports = { state, calculateScore, startRound, submitActions, resetGame, bestElimination, confirmIdentity, finalizeGame, configureGame };
+module.exports = { state, calculateScore, startRound, submitActions, resetGame, bestElimination, confirmIdentity, finalizeGame, configureGame, useSkill, removePlayer };
