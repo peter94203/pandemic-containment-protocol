@@ -25,7 +25,10 @@ const state = {
   outbreak: 0,
   result: null,
   delayedEffects: [],
-  config: { evilCount: 5, samplesPerType: 25 },
+  revealAnnouncement: null,
+  config: { evilCount: 5, samplesPerType: 25, decisionSeconds: 60 },
+  decisionDeadline: null,
+  timerHandle: null,
   notice: '等待主持人啟動收容協議。',
 };
 
@@ -138,6 +141,9 @@ function publicState() {
     submissionCount: Object.keys(state.submissions).length,
     playerCount: Object.keys(state.players).length,
     outbreak: state.outbreak,
+    decisionDeadline: state.decisionDeadline,
+    decisionSeconds: state.config.decisionSeconds,
+    revealAnnouncement: state.revealAnnouncement,
     result: state.result,
     players: Object.values(state.players).map(playerView).sort((a, b) => b.score - a.score || b.resources - a.resources || a.name.localeCompare(b.name, 'zh-Hant')),
     markets: state.markets.map((market) => ({
@@ -195,6 +201,20 @@ function broadcast() {
   for (const response of clients) response.write(message);
 }
 
+function clearDecisionTimer() {
+  if (state.timerHandle) clearTimeout(state.timerHandle);
+  state.timerHandle = null;
+  state.decisionDeadline = null;
+}
+
+function scheduleDecisionTimer() {
+  clearDecisionTimer();
+  state.decisionDeadline = Date.now() + state.config.decisionSeconds * 1000;
+  state.timerHandle = setTimeout(() => {
+    try { forceMarketPass('時間到，未送出的決策已視為全部拒絕。'); broadcast(); } catch (_) {}
+  }, state.config.decisionSeconds * 1000);
+}
+
 function startRound() {
   if (state.phase === 'active') throw new Error('本回合仍有尚未售出的樣本。');
   if (state.phase === 'final') throw new Error('本局已結算，請先重置後再開始。');
@@ -215,10 +235,16 @@ function startRound() {
   state.markets = drawSamples(5).map((sample, index) => ({
     id: index + 1, sample, pot: 0, status: 'active', winnerId: null,
   }));
+  Object.values(state.players).filter((player) => player.role === '假情報員' && player.pendingHiddenSlot).forEach((player) => {
+    const target = state.markets.find((market) => market.id === player.pendingHiddenSlot);
+    if (target) target.sample.hiddenType = true;
+    player.pendingHiddenSlot = null;
+  });
   ensureDeck(5);
   const nextRoundPreview = state.deck[state.deck.length - 1];
   Object.values(state.players).forEach((player) => { player.nextPreview = player.role === '流行病學專家' ? { ...nextRoundPreview } : null; });
   state.notice = `第 ${state.round} 輪開市：請決定五個市場中想收容的樣本。${dueEffects.length ? ` ${dueEffects.length} 項延遲異常已計入失控指數。` : ''}`;
+  scheduleDecisionTimer();
 }
 
 function confirmIdentity(playerId) {
@@ -239,6 +265,7 @@ function selectWinner(candidateIds) {
 }
 
 function resolveMarketPass() {
+  clearDecisionTimer();
   const outcomes = [];
   const firstPass = state.markets.every((market) => market.pot === 0);
   for (const market of state.markets.filter((item) => item.status === 'active')) {
@@ -282,7 +309,20 @@ function resolveMarketPass() {
     state.notice = `第 ${state.round} 輪結束：${outcomes.join('；')}。`;
   } else {
     state.notice = `仍有樣本未售出：${outcomes.join('；')}。請重新決策。`;
+    scheduleDecisionTimer();
   }
+}
+
+function forceMarketPass(reason = '主持人已結算本次決策。') {
+  if (state.phase !== 'active') throw new Error('目前沒有需要結算的市場決策。');
+  const activeMarkets = state.markets.filter((market) => market.status === 'active');
+  Object.values(state.players).forEach((player) => {
+    if (state.submissions[player.id]) return;
+    state.submissions[player.id] = Object.fromEntries(activeMarkets.map((market) => [market.id, 'decline']));
+    if (player.faction === 'good') player.reportUsedRound = state.round;
+  });
+  resolveMarketPass();
+  state.notice = `${reason} ${state.notice}`;
 }
 
 function applyCollectionEffects(player, sample) {
@@ -303,7 +343,13 @@ function reportPlayer(reporterId, targetId) {
   if (reporter.reportUsedRound === state.round) throw new Error('每回合只能舉報一次。');
   if (target.revealed) throw new Error('該玩家已公開陣營。');
   reporter.reportUsedRound = state.round; target.reports += 1;
-  if (target.reports >= 9) { target.revealed = true; state.outbreak += target.faction === 'evil' ? -2 : 2; }
+  if (target.reports >= 9) {
+    target.revealed = true;
+    const change = target.faction === 'evil' ? -2 : 2;
+    state.outbreak += change;
+    state.revealAnnouncement = `舉報門檻達成：${target.name} 已公開為${target.faction === 'evil' ? '反收容派' : '收容協議研究員'}（${target.role}）；失控指數 ${change > 0 ? '+' : ''}${change}。`;
+    state.notice = state.revealAnnouncement;
+  }
 }
 
 function submitActions(playerId, actions) {
@@ -322,8 +368,18 @@ function submitActions(playerId, actions) {
 function useSkill(playerId, marketId) {
   const player = state.players[playerId];
   if (!player) throw new Error('找不到你的實驗室，請重新登入。');
-  if (state.phase !== 'active') throw new Error('技能只能在市場開放期間使用。');
   if (player.faction !== 'evil') throw new Error('只有反收容派可使用隱密行動。');
+  if (player.role === '假情報員' && state.phase === 'between') {
+    const slot = Number(marketId);
+    if (!Number.isInteger(slot) || slot < 1 || slot > 5) throw new Error('請選擇下回合的 A～E 市場。');
+    player.skillUses = player.skillUses || 0;
+    if (player.skillUses >= 3) throw new Error('技能次數已用完。');
+    player.pendingHiddenSlot = slot;
+    player.skillUses += 1;
+    state.notice = '市場偵測到異常操作。';
+    return;
+  }
+  if (state.phase !== 'active') throw new Error('技能只能在市場開放期間使用。');
   const market = state.markets.find((item) => item.id === Number(marketId) && item.status === 'active');
   if (!market) throw new Error('這個市場已結算，請選擇仍在開放中的市場。');
   player.skillUses = player.skillUses || 0;
@@ -332,28 +388,33 @@ function useSkill(playerId, marketId) {
   if (player.role === '變異工程師') { market.sample.risk += 4; market.sample.baseRisk += 4; market.sample.noReduction = true; market.sample.reductionNote = '變異：禁止減傷'; }
   if (player.role === '黑市走私商') market.smuggledBy = playerId;
   if (player.role === '內部破壞者') state.markets.filter((item) => item.status === 'active').forEach((item) => { item.sample.noReduction = true; });
-  if (player.role === '假情報員') market.sample.hiddenType = true;
+  if (player.role === '假情報員') throw new Error('假情報員請在本回合結束後，預先偽造下回合的市場資訊。');
   if (player.role === '失控宿主') market.sample.locked = true;
   player.skillUses += 1;
   state.notice = '市場偵測到異常操作。';
 }
 
 function resetGame() {
-  Object.values(state.players).forEach((player) => { player.resources = 8; player.samples = []; player.role = null; player.faction = 'good'; player.reports = 0; player.revealed = false; player.confirmed = false; player.skillUses = 0; });
+  clearDecisionTimer();
+  Object.values(state.players).forEach((player) => { player.resources = 8; player.samples = []; player.role = null; player.faction = 'good'; player.reports = 0; player.revealed = false; player.confirmed = false; player.skillUses = 0; player.pendingHiddenSlot = null; });
   state.round = 0; state.phase = 'lobby'; state.markets = []; state.deck = []; state.submissions = {}; state.outbreak = 0; state.result = null; state.delayedEffects = [];
+  state.revealAnnouncement = null;
   state.notice = '收容協議已重置，等待主持人啟動。';
 }
 
-function configureGame(evilCount, samplesPerType) {
+function configureGame(evilCount, samplesPerType, decisionSeconds = state.config.decisionSeconds) {
   if (state.phase !== 'lobby') throw new Error('只能在身份發放前設定壞人人數。');
   const count = Number(evilCount);
   const playerCount = Object.keys(state.players).length;
   if (!Number.isInteger(count) || count < 0 || count > playerCount) throw new Error(`壞人人數必須是 0 到 ${playerCount} 的整數。`);
   const sampleCount = Number(samplesPerType);
   if (!Number.isInteger(sampleCount) || sampleCount < 3 || sampleCount > 99) throw new Error('每種樣本數量必須是 3 到 99 的整數。');
+  const seconds = Number(decisionSeconds);
+  if (!Number.isInteger(seconds) || seconds < 10 || seconds > 600) throw new Error('每次決策秒數必須是 10 到 600 的整數。');
   state.config.evilCount = count;
   state.config.samplesPerType = sampleCount;
-  state.notice = `本場將分配 ${count} 名反收容派；病毒、細菌、寄生蟲各 ${sampleCount} 張。等待主持人發放身份。`;
+  state.config.decisionSeconds = seconds;
+  state.notice = `本場將分配 ${count} 名反收容派；病毒、細菌、寄生蟲各 ${sampleCount} 張；每次決策 ${seconds} 秒。等待主持人發放身份。`;
 }
 
 function removePlayer(playerId) {
@@ -425,7 +486,8 @@ const server = http.createServer(async (request, response) => {
     }
     if (request.method === 'POST' && url.pathname === '/api/skill') { const { playerId, marketId } = await readBody(request); useSkill(playerId, marketId); broadcast(); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/start') { requireHost(request); startRound(); broadcast(); return json(response, 200, publicState()); }
-    if (request.method === 'POST' && url.pathname === '/api/host/config') { requireHost(request); const { evilCount, samplesPerType } = await readBody(request); configureGame(evilCount, samplesPerType); broadcast(); return json(response, 200, publicState()); }
+    if (request.method === 'POST' && url.pathname === '/api/host/config') { requireHost(request); const { evilCount, samplesPerType, decisionSeconds } = await readBody(request); configureGame(evilCount, samplesPerType, decisionSeconds); broadcast(); return json(response, 200, publicState()); }
+    if (request.method === 'POST' && url.pathname === '/api/host/force-resolve') { requireHost(request); forceMarketPass(); broadcast(); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/remove-player') { requireHost(request); const { playerId } = await readBody(request); removePlayer(playerId); broadcast(); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/end') { requireHost(request); if (state.phase === 'active') throw new Error('市場尚未全部售出。'); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/reset') { requireHost(request); resetGame(); broadcast(); return json(response, 200, publicState()); }
@@ -442,4 +504,4 @@ const server = http.createServer(async (request, response) => {
 });
 
 if (require.main === module) server.listen(PORT, '0.0.0.0', () => console.log(`P.A.N.D.E.M.I.C. running on http://localhost:${PORT}`));
-module.exports = { state, calculateScore, startRound, submitActions, resetGame, bestElimination, confirmIdentity, finalizeGame, configureGame, useSkill, removePlayer, previewView };
+module.exports = { state, calculateScore, startRound, submitActions, resetGame, bestElimination, confirmIdentity, finalizeGame, configureGame, useSkill, removePlayer, previewView, forceMarketPass };
