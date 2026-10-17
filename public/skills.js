@@ -21,7 +21,7 @@
     else if(active.length) choices=active.map(m=>`<button class="choice" data-market="${m.id}">對市場 ${String.fromCharCode(64+m.id)} 使用技能</button>`).join('');
     else {panel.hidden=true;return;}
     panel.hidden=false;panel.innerHTML=`<h3>隱密行動｜${identity.role}</h3><p>${descriptions[identity.role]}</p>${choices}`;
-    panel.querySelectorAll('[data-market]').forEach(button=>button.onclick=async()=>{const playerId=localStorage.getItem('pandemic-player-id');const r=await fetch('/api/skill',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({playerId,marketId:button.dataset.market})});if(!r.ok)alert((await r.json()).error||'技能未能使用');else{identity=await getIdentity();render();}});
+    panel.querySelectorAll('[data-market]').forEach(button=>button.onclick=async()=>{if(!confirm(`確定要使用「${identity.role}」技能嗎？\n本大回合使用後不能再使用其他技能。`))return;const playerId=localStorage.getItem('pandemic-player-id');const r=await fetch('/api/skill',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({playerId,marketId:button.dataset.market})});if(!r.ok)alert((await r.json()).error||'技能未能使用');else{identity=await getIdentity();render();}});
   }
   const events=new EventSource('/events');events.onmessage=e=>{lastState=JSON.parse(e.data);render();};
 })();

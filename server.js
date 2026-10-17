@@ -24,6 +24,7 @@ const state = {
   deckInitialized: false,
   submissions: {},
   outbreak: 0,
+  outbreakEvents: [],
   result: null,
   delayedEffects: [],
   revealAnnouncement: null,
@@ -112,17 +113,35 @@ function calculateScore(player) {
   return player.resources - totalRisk + bestElimination(player.samples, player.role).saved;
 }
 
+// Keep every public outbreak change explainable on the projection screen.
+function changeOutbreak(amount, reason) {
+  const before = state.outbreak;
+  state.outbreak = Math.max(0, state.outbreak + amount);
+  const actual = state.outbreak - before;
+  const event = { id: crypto.randomUUID(), amount: actual, requestedAmount: amount, reason, round: state.round, at: Date.now() };
+  state.outbreakEvents = [event, ...(state.outbreakEvents || [])].slice(0, 6);
+  return actual;
+}
+
 function endgameAdjustment(player) {
   const elimination = bestElimination(player.samples, player.role);
   const highRisk = player.samples.filter((sample) => sample.risk >= 20);
   const lowSamplePenalty = player.samples.length < 2 ? -300 : 0;
   const highRiskBonus = highRisk.length >= 3 ? highRisk.length * 6 : 0;
   const eliminatedHighRiskBonus = highRisk.filter((sample) => elimination.ids.has(sample.id)).length * 4;
+  const acquired = player.totalAcquired || 0;
+  const uneliminated = player.samples.length - elimination.ids.size;
+  const achievementBonus = [];
+  if (acquired >= 5 && player.samples.length > 0 && elimination.ids.size === player.samples.length) achievementBonus.push({ id: 'total-elimination', title: '零殘留收容', points: 100 });
+  if (acquired >= 10 && uneliminated < 2) achievementBonus.push({ id: 'high-throughput', title: '高效收容網', points: 250 });
+  const achievementTotal = achievementBonus.reduce((sum, item) => sum + item.points, 0);
   return {
     lowSamplePenalty,
     highRiskBonus,
     eliminatedHighRiskBonus,
-    total: lowSamplePenalty + highRiskBonus + eliminatedHighRiskBonus,
+    achievements: achievementBonus,
+    achievementTotal,
+    total: lowSamplePenalty + highRiskBonus + eliminatedHighRiskBonus + achievementTotal,
   };
 }
 
@@ -146,6 +165,8 @@ function playerView(player) {
     role: player.faction === 'evil' && !player.revealed ? '未知' : player.role,
     faction: player.revealed ? player.faction : 'unknown',
     reports: player.reports || 0,
+    achievements: player.achievements || [],
+    totalAcquired: player.totalAcquired || 0,
   };
 }
 
@@ -157,6 +178,7 @@ function publicState() {
     submissionCount: Object.keys(state.submissions).length,
     playerCount: Object.keys(state.players).length,
     outbreak: state.outbreak,
+    outbreakEvents: state.outbreakEvents || [],
     decisionDeadline: state.decisionDeadline,
     decisionSeconds: state.config.decisionSeconds,
     revealAnnouncement: state.revealAnnouncement,
@@ -183,7 +205,8 @@ function assignRoles() {
     player.role = index < evilCount
       ? evilRoles[index % evilRoles.length]
       : goodRoles[(index - evilCount) % goodRoles.length];
-    player.reports = 0; player.revealed = false; player.reportUsedRound = 0; player.confirmed = false; player.skillUses = 0;
+    player.reports = 0; player.revealed = false; player.reportUsedRound = 0; player.confirmed = false; player.skillUses = 0; player.skillUsedRound = null;
+    player.roundCollected = false; player.roundVirusCollected = 0; player.totalAcquired = 0; player.achievements = [];
   });
 }
 
@@ -250,9 +273,9 @@ function startRound() {
   }
   state.round += 1;
   const dueEffects = (state.delayedEffects || []).filter((effect) => effect.dueRound <= state.round);
-  dueEffects.forEach((effect) => { state.outbreak += effect.amount; });
+  dueEffects.forEach((effect) => { changeOutbreak(effect.amount, `延遲異常：${state.players[effect.sourceId]?.name || '未知來源'}`); });
   state.delayedEffects = (state.delayedEffects || []).filter((effect) => effect.dueRound > state.round);
-  Object.values(state.players).forEach((player) => { player.roundCollected = false; });
+  Object.values(state.players).forEach((player) => { player.roundCollected = false; player.roundVirusCollected = 0; });
   state.phase = 'active';
   state.submissions = {};
   state.markets = drawSamples(5).map((sample, index) => ({
@@ -304,6 +327,15 @@ function resolveMarketPass() {
       const winner = state.players[winnerId];
       applyCollectionEffects(winner, market.sample);
       winner.samples.push(market.sample);
+      winner.totalAcquired = (winner.totalAcquired || 0) + 1;
+      if (market.sample.type === 'virus') {
+        winner.roundVirusCollected = (winner.roundVirusCollected || 0) + 1;
+        if (winner.roundVirusCollected >= 2 && !(winner.achievements || []).some((item) => item.id === 'double-virus')) {
+          winner.resources += 20;
+          winner.achievements = [...(winner.achievements || []), { id: 'double-virus', title: '病毒雙重收容', points: 20, round: state.round }];
+          outcomes.push(`${winner.name} 達成「病毒雙重收容」：隔離點數 +20`);
+        }
+      }
       if (winner.role === '疫苗開發員') {
         const elimination = bestElimination(winner.samples, winner.role);
         const completedGroups = elimination.groups.filter((group) => group.some((sample) => sample.id === market.sample.id)).length;
@@ -315,13 +347,15 @@ function resolveMarketPass() {
       market.status = 'sold';
       market.winnerId = winnerId;
       outcomes.push(`${winner.name} 收容 ${market.sample.code}`);
-      if (market.smuggledBy && firstPass) { state.outbreak += 1; state.players[market.smuggledBy].resources += 2; outcomes.push('走私標記在首輪成功流入，失控 +1'); }
+      if (market.smuggledBy && firstPass) { changeOutbreak(1, `黑市走私標記：${market.sample.code} 在首輪被收容`); state.players[market.smuggledBy].resources += 2; outcomes.push('走私標記在首輪成功流入，失控 +1'); }
     } else {
       Object.values(state.players).forEach((player) => { if (!(player.role === '生物安全官' && player.safetyUsedRound !== state.round)) { player.resources -= 1; } else player.safetyUsedRound = state.round; });
       market.pot += Object.keys(state.players).length;
-      if (!market.outbreakCounted) { state.outbreak += 1; market.outbreakCounted = true; }
-      if (market.sample.naturalMutation) state.outbreak += 1;
-      outcomes.push(`${market.sample.code} 無人收容，拒絕池累積至 ${market.pot}${market.sample.naturalMutation ? '；天然突變樣本額外造成失控' : ''}`);
+      market.uncollectedPasses = (market.uncollectedPasses || 0) + 1;
+      const chance = market.uncollectedPasses === 1 ? 0.2 : market.uncollectedPasses === 2 ? 0.4 : 0.8;
+      if (Math.random() < chance) changeOutbreak(1, `${market.sample.code} 第 ${market.uncollectedPasses} 小回合滯留市場（${Math.round(chance * 100)}% 失控檢定）`);
+      if (market.sample.naturalMutation) changeOutbreak(1, `天然突變樣本 ${market.sample.code} 未在本小回合收容`);
+      outcomes.push(`${market.sample.code} 無人收容，拒絕池累積至 ${market.pot}；滯留失控檢定 ${Math.round(chance * 100)}%${market.sample.naturalMutation ? '；天然突變樣本額外造成失控' : ''}`);
     }
   }
   if (state.sabotageArmedBy && firstPass && state.markets.some((market) => market.status === 'active')) {
@@ -333,9 +367,9 @@ function resolveMarketPass() {
   if (firstPass) state.sabotageArmedBy = null;
   state.submissions = {};
   if (state.markets.every((market) => market.status === 'sold')) {
-    if (firstPass) state.outbreak = Math.max(0, state.outbreak - 2);
+    if (firstPass) changeOutbreak(-5, '五張樣本皆在第一小回合完成收容');
     const evilWins = state.markets.filter((market) => state.players[market.winnerId].faction === 'evil').length;
-    if (evilWins >= 2) state.outbreak += 2;
+    if (evilWins >= 2) changeOutbreak(1, `本大輪有 ${evilWins} 張樣本由反收容派收容`);
     if (state.deck.length === 0) { state.phase = 'between'; finalizeGame(); return; }
     state.phase = 'between';
     prepareNextRoundIntel();
@@ -378,8 +412,8 @@ function reportPlayer(reporterId, targetId) {
   reporter.reportUsedRound = state.round; target.reports += 1;
   if (target.reports >= 9) {
     target.revealed = true;
-    const change = target.faction === 'evil' ? -2 : 3;
-    state.outbreak += change;
+    const change = target.faction === 'evil' ? -8 : 4;
+    changeOutbreak(change, `九票舉報公開 ${target.name} 為${target.faction === 'evil' ? '反收容派' : '收容協議研究員'}`);
     state.revealAnnouncement = `舉報門檻達成：${target.name} 已公開為${target.faction === 'evil' ? '反收容派' : '收容協議研究員'}（${target.role}）；失控指數 ${change > 0 ? '+' : ''}${change}。`;
     state.notice = state.revealAnnouncement;
   }
@@ -402,6 +436,7 @@ function useSkill(playerId, marketId) {
   const player = state.players[playerId];
   if (!player) throw new Error('找不到你的實驗室，請重新登入。');
   if (player.faction !== 'evil') throw new Error('只有反收容派可使用隱密行動。');
+  if (player.skillUsedRound === state.round) throw new Error('每一大回合最多只能使用一次技能。');
   if (player.role === '假情報員' && state.phase === 'between') {
     const slot = Number(marketId);
     if (!Number.isInteger(slot) || slot < 1 || slot > 5) throw new Error('請選擇下回合的 A～E 市場。');
@@ -409,7 +444,7 @@ function useSkill(playerId, marketId) {
     player.skillUses = player.skillUses || 0;
     if (player.skillUses >= 4) throw new Error('技能次數已用完。');
     player.pendingHiddenSlot = slot;
-    player.skillUses += 1;
+    player.skillUses += 1; player.skillUsedRound = state.round;
     state.notice = '市場偵測到異常操作。';
     return;
   }
@@ -420,7 +455,7 @@ function useSkill(playerId, marketId) {
     player.skillUses = player.skillUses || 0;
     if (player.skillUses >= 3) throw new Error('技能次數已用完。');
     player.pendingSmuggledSampleId = targetId;
-    player.skillUses += 1;
+    player.skillUses += 1; player.skillUsedRound = state.round;
     state.notice = '市場偵測到異常操作。';
     return;
   }
@@ -438,14 +473,14 @@ function useSkill(playerId, marketId) {
   }
   if (player.role === '假情報員') throw new Error('假情報員請在本回合結束後，預先偽造下回合的市場資訊。');
   if (player.role === '失控宿主') { market.sample.locked = true; market.sample.hostLock = true; }
-  player.skillUses += 1;
+  player.skillUses += 1; player.skillUsedRound = state.round;
   state.notice = '市場偵測到異常操作。';
 }
 
 function resetGame() {
   clearDecisionTimer();
-  Object.values(state.players).forEach((player) => { player.resources = 8; player.samples = []; player.role = null; player.faction = 'good'; player.reports = 0; player.revealed = false; player.confirmed = false; player.skillUses = 0; player.pendingHiddenSlot = null; player.pendingSmuggledSampleId = null; player.nextSmugglerPreview = null; });
-  state.round = 0; state.phase = 'lobby'; state.markets = []; state.deck = []; state.deckInitialized = false; state.submissions = {}; state.outbreak = 0; state.result = null; state.delayedEffects = []; state.sabotageArmedBy = null;
+  Object.values(state.players).forEach((player) => { player.resources = 8; player.samples = []; player.role = null; player.faction = 'good'; player.reports = 0; player.revealed = false; player.confirmed = false; player.skillUses = 0; player.skillUsedRound = null; player.roundCollected = false; player.roundVirusCollected = 0; player.totalAcquired = 0; player.achievements = []; player.pendingHiddenSlot = null; player.pendingSmuggledSampleId = null; player.nextSmugglerPreview = null; });
+  state.round = 0; state.phase = 'lobby'; state.markets = []; state.deck = []; state.deckInitialized = false; state.submissions = {}; state.outbreak = 0; state.outbreakEvents = []; state.result = null; state.delayedEffects = []; state.sabotageArmedBy = null;
   state.revealAnnouncement = null;
   state.notice = '收容協議已重置，等待主持人啟動。';
 }
@@ -476,19 +511,24 @@ function removePlayer(playerId) {
   }
 }
 
-function finalizeGame() {
-  if (state.phase === 'active') throw new Error('請先完成目前所有市場。');
+function finalizeGame(force = false) {
+  if (state.phase === 'active' && !force) throw new Error('請先完成目前所有市場。');
   if (state.phase === 'lobby' || state.phase === 'identity') throw new Error('遊戲尚未開始。');
+  const forcedDuringMarket = state.phase === 'active';
+  if (forcedDuringMarket) { clearDecisionTimer(); state.submissions = {}; }
   const winningFaction = state.outbreak >= 10 ? 'evil' : 'good';
   const scores = Object.values(state.players).map((player) => {
     let bonus = 0;
     if (player.faction === 'good' && winningFaction === 'good') bonus = 20;
     if (player.faction === 'evil' && winningFaction === 'evil') bonus = player.reports < 3 ? 50 : player.reports < 9 ? 15 : 5;
     const adjustment = endgameAdjustment(player);
-    return { id: player.id, name: player.name, faction: player.faction, role: player.role, base: calculateScore(player), adjustment, bonus, total: calculateScore(player) + adjustment.total + bonus };
+    const achievements = [...(player.achievements || []), ...adjustment.achievements];
+    return { id: player.id, name: player.name, faction: player.faction, role: player.role, base: calculateScore(player), adjustment, achievements, bonus, total: calculateScore(player) + adjustment.total + bonus };
   }).sort((a,b) => b.total - a.total);
   state.result = { winningFaction, scores };
-  state.phase = 'final'; state.notice = winningFaction === 'evil' ? `失控指數 ${state.outbreak}：反收容派勝利。` : `失控指數 ${state.outbreak}：收容協議成功。`;
+  state.phase = 'final';
+  const ending = winningFaction === 'evil' ? `失控指數 ${state.outbreak}：反收容派勝利。` : `失控指數 ${state.outbreak}：收容協議成功。`;
+  state.notice = forcedDuringMarket ? `主持人已強制提前結算；未收容市場不計入持有樣本。${ending}` : ending;
 }
 
 function readBody(request) {
@@ -517,7 +557,7 @@ const server = http.createServer(async (request, response) => {
       if (state.phase !== 'lobby') throw new Error('遊戲已開始，請等待下一場收容協議。');
       const { name } = await readBody(request); const clean = String(name || '').trim().slice(0, 16);
       if (!clean) throw new Error('請輸入玩家名稱。');
-      const id = crypto.randomUUID(); state.players[id] = { id, name: clean, resources: 8, samples: [] };
+      const id = crypto.randomUUID(); state.players[id] = { id, name: clean, resources: 8, samples: [], totalAcquired: 0, achievements: [] };
       broadcast(); return json(response, 201, { id });
     }
     if (request.method === 'POST' && url.pathname === '/api/submit') {
@@ -536,7 +576,7 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'POST' && url.pathname === '/api/host/remove-player') { requireHost(request); const { playerId } = await readBody(request); removePlayer(playerId); broadcast(); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/end') { requireHost(request); if (state.phase === 'active') throw new Error('市場尚未全部售出。'); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/reset') { requireHost(request); resetGame(); broadcast(); return json(response, 200, publicState()); }
-    if (request.method === 'POST' && url.pathname === '/api/host/finalize') { requireHost(request); finalizeGame(); broadcast(); return json(response, 200, publicState()); }
+    if (request.method === 'POST' && url.pathname === '/api/host/finalize') { requireHost(request); finalizeGame(true); broadcast(); return json(response, 200, publicState()); }
     const filename = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
     const file = path.normalize(path.join(PUBLIC, filename));
     if (!file.startsWith(PUBLIC)) return json(response, 403, { error: '禁止存取' });
