@@ -26,7 +26,7 @@ const state = {
   result: null,
   delayedEffects: [],
   revealAnnouncement: null,
-  config: { evilCount: 5, samplesPerType: 25, decisionSeconds: 60 },
+  config: { samplesPerType: 25, decisionSeconds: 60 },
   decisionDeadline: null,
   timerHandle: null,
   notice: '等待主持人啟動收容協議。',
@@ -158,7 +158,7 @@ function publicState() {
 
 function assignRoles() {
   const players = shuffle(Object.values(state.players));
-  const evilCount = Math.min(state.config.evilCount, players.length);
+  const evilCount = Math.ceil(players.length / 4);
   const evilRoles = shuffle(EVIL_ROLES);
   const goodRoles = shuffle(GOOD_ROLES);
   players.forEach((player, index) => {
@@ -403,19 +403,17 @@ function resetGame() {
   state.notice = '收容協議已重置，等待主持人啟動。';
 }
 
-function configureGame(evilCount, samplesPerType, decisionSeconds = state.config.decisionSeconds) {
-  if (state.phase !== 'lobby') throw new Error('只能在身份發放前設定壞人人數。');
-  const count = Number(evilCount);
+function configureGame(samplesPerType, decisionSeconds = state.config.decisionSeconds) {
+  if (state.phase !== 'lobby') throw new Error('只能在身份發放前設定本場參數。');
   const playerCount = Object.keys(state.players).length;
-  if (!Number.isInteger(count) || count < 0 || count > playerCount) throw new Error(`壞人人數必須是 0 到 ${playerCount} 的整數。`);
   const sampleCount = Number(samplesPerType);
   if (!Number.isInteger(sampleCount) || sampleCount < 3 || sampleCount > 99) throw new Error('每種樣本數量必須是 3 到 99 的整數。');
   const seconds = Number(decisionSeconds);
   if (!Number.isInteger(seconds) || seconds < 10 || seconds > 600) throw new Error('每次決策秒數必須是 10 到 600 的整數。');
-  state.config.evilCount = count;
   state.config.samplesPerType = sampleCount;
   state.config.decisionSeconds = seconds;
-  state.notice = `本場將分配 ${count} 名反收容派；病毒、細菌、寄生蟲各 ${sampleCount} 張；每次決策 ${seconds} 秒。等待主持人發放身份。`;
+  const evilCount = Math.ceil(playerCount / 4);
+  state.notice = `本場將依 ${playerCount} 位玩家自動分配 ${evilCount} 名反收容派；病毒、細菌、寄生蟲各 ${sampleCount} 張；每次決策 ${seconds} 秒。等待主持人發放身份。`;
 }
 
 function removePlayer(playerId) {
@@ -487,7 +485,7 @@ const server = http.createServer(async (request, response) => {
     }
     if (request.method === 'POST' && url.pathname === '/api/skill') { const { playerId, marketId } = await readBody(request); useSkill(playerId, marketId); broadcast(); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/start') { requireHost(request); startRound(); broadcast(); return json(response, 200, publicState()); }
-    if (request.method === 'POST' && url.pathname === '/api/host/config') { requireHost(request); const { evilCount, samplesPerType, decisionSeconds } = await readBody(request); configureGame(evilCount, samplesPerType, decisionSeconds); broadcast(); return json(response, 200, publicState()); }
+    if (request.method === 'POST' && url.pathname === '/api/host/config') { requireHost(request); const { samplesPerType, decisionSeconds } = await readBody(request); configureGame(samplesPerType, decisionSeconds); broadcast(); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/force-resolve') { requireHost(request); forceMarketPass(); broadcast(); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/remove-player') { requireHost(request); const { playerId } = await readBody(request); removePlayer(playerId); broadcast(); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/end') { requireHost(request); if (state.phase === 'active') throw new Error('市場尚未全部售出。'); return json(response, 200, publicState()); }
