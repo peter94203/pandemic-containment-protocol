@@ -25,6 +25,7 @@ const state = {
   outbreak: 0,
   result: null,
   delayedEffects: [],
+  config: { evilCount: 5, samplesPerType: 25 },
   notice: '等待主持人啟動收容協議。',
 };
 
@@ -38,7 +39,7 @@ function shuffle(items) {
 }
 
 function buildDeck() {
-  return shuffle(SAMPLE_TYPES.flatMap((type) => Array.from({ length: 25 }, (_, index) => ({
+  return shuffle(SAMPLE_TYPES.flatMap((type) => Array.from({ length: state.config.samplesPerType }, (_, index) => ({
     id: crypto.randomUUID(), type: type.id, typeLabel: type.label,
     code: `${type.prefix}-${String(index + 1).padStart(2, '0')}`,
     risk: index + 1, baseRisk: index + 1,
@@ -55,15 +56,17 @@ function eliminationCandidates(samples) {
   for (const type of SAMPLE_TYPES) {
     const cards = samples.filter((sample) => sample.type === type.id && !sample.locked);
     const byRisk = new Map(cards.map((sample) => [sample.risk, sample]));
-    for (let start = 1; start <= 23; start += 1) {
-      const run = [];
-      for (let risk = start; risk <= 25 && byRisk.has(risk); risk += 1) {
-        run.push(byRisk.get(risk));
+    const risks = [...byRisk.keys()].sort((a, b) => a - b);
+    for (let start = 0; start < risks.length; start += 1) {
+      const run = [byRisk.get(risks[start])];
+      for (let index = start + 1; index < risks.length && risks[index] === risks[index - 1] + 1; index += 1) {
+        run.push(byRisk.get(risks[index]));
         if (run.length >= 3) candidates.push([...run]);
       }
     }
   }
-  for (let risk = 1; risk <= 25; risk += 1) {
+  const risks = [...new Set(samples.map((sample) => sample.risk))];
+  for (const risk of risks) {
     const trio = SAMPLE_TYPES.map((type) => samples.find((sample) => sample.type === type.id && sample.risk === risk && !sample.locked));
     if (trio.every(Boolean)) candidates.push(trio);
   }
@@ -139,10 +142,15 @@ function publicState() {
 
 function assignRoles() {
   const players = shuffle(Object.values(state.players));
-  const evilCount = 5;
+  const evilCount = Math.min(state.config.evilCount, players.length);
+  const evilRoles = shuffle(EVIL_ROLES);
+  const goodRoles = shuffle(GOOD_ROLES);
   players.forEach((player, index) => {
     player.faction = index < evilCount ? 'evil' : 'good';
-    player.role = index < evilCount ? EVIL_ROLES[index % EVIL_ROLES.length] : GOOD_ROLES[(index - evilCount) % GOOD_ROLES.length];
+    // 每種陣營先完整發過一輪不重複身份，之後才從下一輪重新使用。
+    player.role = index < evilCount
+      ? evilRoles[index % evilRoles.length]
+      : goodRoles[(index - evilCount) % goodRoles.length];
     player.reports = 0; player.revealed = false; player.reportUsedRound = 0; player.confirmed = false;
   });
 }
@@ -173,9 +181,8 @@ function broadcast() {
 function startRound() {
   if (state.phase === 'active') throw new Error('本回合仍有尚未售出的樣本。');
   if (state.phase === 'final') throw new Error('本局已結算，請先重置後再開始。');
-  if (Object.keys(state.players).length < 2) throw new Error('至少需要兩位玩家才能開始。');
+  if (Object.keys(state.players).length < 1) throw new Error('至少需要一位玩家才能開始。');
   if (state.phase === 'lobby') {
-    if (Object.keys(state.players).length < 20) throw new Error('固定五名壞人，至少需要 20 位玩家。');
     assignRoles(); state.phase = 'identity'; state.notice = '身份已發放，等待所有玩家確認。'; return;
   }
   if (state.phase === 'identity') {
@@ -308,6 +315,18 @@ function resetGame() {
   state.notice = '收容協議已重置，等待主持人啟動。';
 }
 
+function configureGame(evilCount, samplesPerType) {
+  if (state.phase !== 'lobby') throw new Error('只能在身份發放前設定壞人人數。');
+  const count = Number(evilCount);
+  const playerCount = Object.keys(state.players).length;
+  if (!Number.isInteger(count) || count < 0 || count > playerCount) throw new Error(`壞人人數必須是 0 到 ${playerCount} 的整數。`);
+  const sampleCount = Number(samplesPerType);
+  if (!Number.isInteger(sampleCount) || sampleCount < 3 || sampleCount > 99) throw new Error('每種樣本數量必須是 3 到 99 的整數。');
+  state.config.evilCount = count;
+  state.config.samplesPerType = sampleCount;
+  state.notice = `本場將分配 ${count} 名反收容派；病毒、細菌、寄生蟲各 ${sampleCount} 張。等待主持人發放身份。`;
+}
+
 function finalizeGame() {
   if (state.phase === 'active') throw new Error('請先完成目前所有市場。');
   if (state.phase === 'lobby' || state.phase === 'identity') throw new Error('遊戲尚未開始。');
@@ -363,6 +382,7 @@ const server = http.createServer(async (request, response) => {
     }
     if (request.method === 'POST' && url.pathname === '/api/skill') { const { playerId, marketId } = await readBody(request); useSkill(playerId, marketId); broadcast(); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/start') { requireHost(request); startRound(); broadcast(); return json(response, 200, publicState()); }
+    if (request.method === 'POST' && url.pathname === '/api/host/config') { requireHost(request); const { evilCount, samplesPerType } = await readBody(request); configureGame(evilCount, samplesPerType); broadcast(); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/end') { requireHost(request); if (state.phase === 'active') throw new Error('市場尚未全部售出。'); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/reset') { requireHost(request); resetGame(); broadcast(); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/finalize') { requireHost(request); finalizeGame(); broadcast(); return json(response, 200, publicState()); }
@@ -378,4 +398,4 @@ const server = http.createServer(async (request, response) => {
 });
 
 if (require.main === module) server.listen(PORT, '0.0.0.0', () => console.log(`P.A.N.D.E.M.I.C. running on http://localhost:${PORT}`));
-module.exports = { state, calculateScore, startRound, submitActions, resetGame, bestElimination, confirmIdentity, finalizeGame };
+module.exports = { state, calculateScore, startRound, submitActions, resetGame, bestElimination, confirmIdentity, finalizeGame, configureGame };
