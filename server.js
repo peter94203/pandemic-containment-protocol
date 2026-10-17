@@ -293,7 +293,7 @@ function startRound() {
   });
   const nextRound = state.deck.slice(Math.max(0, state.deck.length - 5)).reverse();
   Object.values(state.players).forEach((player) => { player.nextPreview = player.role === '流行病學專家' ? nextRound.slice(0, 3).map((sample) => ({ ...sample })) : null; });
-  state.notice = `第 ${state.round} 輪開市：請決定五個市場中想收容的樣本。${dueEffects.length ? ` ${dueEffects.length} 項延遲異常已計入失控指數。` : ''}`;
+  state.notice = `第 ${state.round} 輪開啟：請決定五個病原體分配所中想收容的樣本。${dueEffects.length ? ` ${dueEffects.length} 項延遲異常已計入失控指數。` : ''}`;
   scheduleDecisionTimer();
 }
 
@@ -353,7 +353,7 @@ function resolveMarketPass() {
       market.pot += Object.keys(state.players).length;
       market.uncollectedPasses = (market.uncollectedPasses || 0) + 1;
       const chance = market.uncollectedPasses === 1 ? 0.2 : market.uncollectedPasses === 2 ? 0.4 : 0.8;
-      if (Math.random() < chance) changeOutbreak(1, `${market.sample.code} 第 ${market.uncollectedPasses} 小回合滯留市場（${Math.round(chance * 100)}% 失控檢定）`);
+      if (Math.random() < chance) changeOutbreak(1, `${market.sample.code} 第 ${market.uncollectedPasses} 小回合滯留病原體分配所（${Math.round(chance * 100)}% 失控檢定）`);
       if (market.sample.naturalMutation) changeOutbreak(1, `天然突變樣本 ${market.sample.code} 未在本小回合收容`);
       outcomes.push(`${market.sample.code} 無人收容，拒絕池累積至 ${market.pot}；滯留失控檢定 ${Math.round(chance * 100)}%${market.sample.naturalMutation ? '；天然突變樣本額外造成失控' : ''}`);
     }
@@ -369,7 +369,7 @@ function resolveMarketPass() {
   if (state.markets.every((market) => market.status === 'sold')) {
     if (firstPass) changeOutbreak(-5, '五張樣本皆在第一小回合完成收容');
     const evilWins = state.markets.filter((market) => state.players[market.winnerId].faction === 'evil').length;
-    if (evilWins >= 2) changeOutbreak(1, `本大輪有 ${evilWins} 張樣本由反收容派收容`);
+    if (evilWins >= 2) changeOutbreak(1, `本大輪有 ${evilWins} 張樣本由狂人陣營收容`);
     if (state.deck.length === 0) { state.phase = 'between'; finalizeGame(); return; }
     state.phase = 'between';
     prepareNextRoundIntel();
@@ -381,7 +381,7 @@ function resolveMarketPass() {
 }
 
 function forceMarketPass(reason = '主持人已結算本次決策。') {
-  if (state.phase !== 'active') throw new Error('目前沒有需要結算的市場決策。');
+  if (state.phase !== 'active') throw new Error('目前沒有需要結算的病原體分配所決策。');
   const activeMarkets = state.markets.filter((market) => market.status === 'active');
   Object.values(state.players).forEach((player) => {
     if (state.submissions[player.id]) return;
@@ -413,19 +413,19 @@ function reportPlayer(reporterId, targetId) {
   if (target.reports >= 9) {
     target.revealed = true;
     const change = target.faction === 'evil' ? -8 : 4;
-    changeOutbreak(change, `九票舉報公開 ${target.name} 為${target.faction === 'evil' ? '反收容派' : '收容協議研究員'}`);
-    state.revealAnnouncement = `舉報門檻達成：${target.name} 已公開為${target.faction === 'evil' ? '反收容派' : '收容協議研究員'}（${target.role}）；失控指數 ${change > 0 ? '+' : ''}${change}。`;
+    changeOutbreak(change, `九票舉報公開 ${target.name} 為${target.faction === 'evil' ? '狂人陣營' : '研究員陣營'}`);
+    state.revealAnnouncement = `舉報門檻達成：${target.name} 已公開為${target.faction === 'evil' ? '狂人陣營' : '研究員陣營'}（${target.role}）；失控指數 ${change > 0 ? '+' : ''}${change}。`;
     state.notice = state.revealAnnouncement;
   }
 }
 
 function submitActions(playerId, actions) {
-  if (state.phase !== 'active') throw new Error('目前沒有進行中的市場。');
+  if (state.phase !== 'active') throw new Error('目前沒有進行中的病原體分配所。');
   if (!state.players[playerId]) throw new Error('找不到玩家，請重新加入。');
   if (state.submissions[playerId]) throw new Error('你已提交本輪決策。');
   const activeMarkets = state.markets.filter((market) => market.status === 'active');
   if (!actions || typeof actions !== 'object' || activeMarkets.some((market) => !['accept', 'decline'].includes(actions[market.id]))) {
-    throw new Error('請為每一個尚未售出的市場作出決定。');
+    throw new Error('請為每一個尚未分配的樣本作出決定。');
   }
   state.submissions[playerId] = actions;
   if (Object.keys(state.submissions).length === Object.keys(state.players).length) resolveMarketPass();
@@ -435,17 +435,17 @@ function submitActions(playerId, actions) {
 function useSkill(playerId, marketId) {
   const player = state.players[playerId];
   if (!player) throw new Error('找不到你的實驗室，請重新登入。');
-  if (player.faction !== 'evil') throw new Error('只有反收容派可使用隱密行動。');
+  if (player.faction !== 'evil') throw new Error('只有狂人陣營可使用隱密行動。');
   if (player.skillUsedRound === state.round) throw new Error('每一大回合最多只能使用一次技能。');
   if (player.role === '假情報員' && state.phase === 'between') {
     const slot = Number(marketId);
-    if (!Number.isInteger(slot) || slot < 1 || slot > 5) throw new Error('請選擇下回合的 A～E 市場。');
-    if (player.pendingHiddenSlot) throw new Error('你已預先偽造一個下回合市場，請等待下一回合開市。');
+    if (!Number.isInteger(slot) || slot < 1 || slot > 5) throw new Error('請選擇下回合的 A～E 病原體分配所。');
+    if (player.pendingHiddenSlot) throw new Error('你已預先偽造一個下回合病原體分配所，請等待下一回合開啟。');
     player.skillUses = player.skillUses || 0;
     if (player.skillUses >= 4) throw new Error('技能次數已用完。');
     player.pendingHiddenSlot = slot;
     player.skillUses += 1; player.skillUsedRound = state.round;
-    state.notice = '市場偵測到異常操作。';
+    state.notice = '病原體分配所偵測到異常操作。';
     return;
   }
   if (player.role === '黑市走私商' && state.phase === 'between') {
@@ -456,12 +456,12 @@ function useSkill(playerId, marketId) {
     if (player.skillUses >= 3) throw new Error('技能次數已用完。');
     player.pendingSmuggledSampleId = targetId;
     player.skillUses += 1; player.skillUsedRound = state.round;
-    state.notice = '市場偵測到異常操作。';
+    state.notice = '病原體分配所偵測到異常操作。';
     return;
   }
-  if (state.phase !== 'active') throw new Error('技能只能在市場開放期間使用。');
+  if (state.phase !== 'active') throw new Error('技能只能在病原體分配所開放期間使用。');
   const market = state.markets.find((item) => item.id === Number(marketId) && item.status === 'active');
-  if (!market) throw new Error('這個市場已結算，請選擇仍在開放中的市場。');
+  if (!market) throw new Error('這個病原體分配所已結算，請選擇仍在開放中的病原體分配所。');
   player.skillUses = player.skillUses || 0;
   const limits = { '變異工程師': 5, '黑市走私商': 3, '內部破壞者': 2, '假情報員': 4, '失控宿主': 3 };
   if (player.skillUses >= limits[player.role]) throw new Error('技能次數已用完。');
@@ -471,10 +471,10 @@ function useSkill(playerId, marketId) {
     if (!state.markets.every((item) => item.pot === 0)) throw new Error('內部破壞只能在第一小回合啟用。');
     state.sabotageArmedBy = playerId;
   }
-  if (player.role === '假情報員') throw new Error('假情報員請在本回合結束後，預先偽造下回合的市場資訊。');
+  if (player.role === '假情報員') throw new Error('假情報員請在本回合結束後，預先偽造下回合的病原體分配所資訊。');
   if (player.role === '失控宿主') { market.sample.locked = true; market.sample.hostLock = true; }
   player.skillUses += 1; player.skillUsedRound = state.round;
-  state.notice = '市場偵測到異常操作。';
+  state.notice = '病原體分配所偵測到異常操作。';
 }
 
 function resetGame() {
@@ -495,11 +495,11 @@ function configureGame(samplesPerType, decisionSeconds = state.config.decisionSe
   state.config.samplesPerType = sampleCount;
   state.config.decisionSeconds = seconds;
   const evilCount = Math.ceil(playerCount / 4);
-  state.notice = `本場將依 ${playerCount} 位玩家自動分配 ${evilCount} 名反收容派；病毒、細菌、寄生蟲各 ${sampleCount} 張；每次決策 ${seconds} 秒。等待主持人發放身份。`;
+  state.notice = `本場將依 ${playerCount} 位玩家自動分配 ${evilCount} 名狂人陣營成員；病毒、細菌、寄生蟲各 ${sampleCount} 張；每次決策 ${seconds} 秒。等待主持人發放身份。`;
 }
 
 function removePlayer(playerId) {
-  if (!['lobby', 'identity'].includes(state.phase)) throw new Error('市場已開啟，為避免結算錯誤，本回合不能移除玩家。');
+  if (!['lobby', 'identity'].includes(state.phase)) throw new Error('病原體分配所已開啟，為避免結算錯誤，本回合不能移除玩家。');
   const player = state.players[playerId];
   if (!player) throw new Error('這位玩家已不存在。');
   delete state.players[playerId];
@@ -512,23 +512,23 @@ function removePlayer(playerId) {
 }
 
 function finalizeGame(force = false) {
-  if (state.phase === 'active' && !force) throw new Error('請先完成目前所有市場。');
+  if (state.phase === 'active' && !force) throw new Error('請先完成目前所有病原體分配所。');
   if (state.phase === 'lobby' || state.phase === 'identity') throw new Error('遊戲尚未開始。');
   const forcedDuringMarket = state.phase === 'active';
   if (forcedDuringMarket) { clearDecisionTimer(); state.submissions = {}; }
   const winningFaction = state.outbreak >= 10 ? 'evil' : 'good';
   const scores = Object.values(state.players).map((player) => {
     let bonus = 0;
-    if (player.faction === 'good' && winningFaction === 'good') bonus = 20;
-    if (player.faction === 'evil' && winningFaction === 'evil') bonus = player.reports < 3 ? 50 : player.reports < 9 ? 15 : 5;
+    if (player.faction === 'good' && winningFaction === 'good') bonus = 30;
+    if (player.faction === 'evil' && winningFaction === 'evil') bonus = player.reports < 3 ? 75 : player.reports < 9 ? 35 : 10;
     const adjustment = endgameAdjustment(player);
     const achievements = [...(player.achievements || []), ...adjustment.achievements];
     return { id: player.id, name: player.name, faction: player.faction, role: player.role, base: calculateScore(player), adjustment, achievements, bonus, total: calculateScore(player) + adjustment.total + bonus };
   }).sort((a,b) => b.total - a.total);
   state.result = { winningFaction, scores };
   state.phase = 'final';
-  const ending = winningFaction === 'evil' ? `失控指數 ${state.outbreak}：反收容派勝利。` : `失控指數 ${state.outbreak}：收容協議成功。`;
-  state.notice = forcedDuringMarket ? `主持人已強制提前結算；未收容市場不計入持有樣本。${ending}` : ending;
+  const ending = winningFaction === 'evil' ? `失控指數 ${state.outbreak}：狂人陣營勝利。` : `失控指數 ${state.outbreak}：研究員陣營勝利。`;
+  state.notice = forcedDuringMarket ? `主持人已強制提前結算；未收容的分配所樣本不計入持有樣本。${ending}` : ending;
 }
 
 function readBody(request) {
@@ -574,7 +574,7 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'POST' && url.pathname === '/api/host/config') { requireHost(request); const { samplesPerType, decisionSeconds } = await readBody(request); configureGame(samplesPerType, decisionSeconds); broadcast(); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/force-resolve') { requireHost(request); forceMarketPass(); broadcast(); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/remove-player') { requireHost(request); const { playerId } = await readBody(request); removePlayer(playerId); broadcast(); return json(response, 200, publicState()); }
-    if (request.method === 'POST' && url.pathname === '/api/host/end') { requireHost(request); if (state.phase === 'active') throw new Error('市場尚未全部售出。'); return json(response, 200, publicState()); }
+    if (request.method === 'POST' && url.pathname === '/api/host/end') { requireHost(request); if (state.phase === 'active') throw new Error('病原體分配所尚未全部完成分配。'); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/reset') { requireHost(request); resetGame(); broadcast(); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/finalize') { requireHost(request); finalizeGame(true); broadcast(); return json(response, 200, publicState()); }
     const filename = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
