@@ -46,13 +46,19 @@ function buildDeck() {
   }))));
 }
 
+function ensureDeck(count) {
+  while (state.deck.length < count) state.deck.push(...buildDeck());
+}
+
 function drawSamples(count) {
-  if (state.deck.length < count) state.deck.push(...buildDeck());
+  ensureDeck(count);
   return Array.from({ length: count }, () => state.deck.pop());
 }
 
-function eliminationCandidates(samples) {
+function eliminationCandidates(samples, role) {
   const candidates = [];
+  const sequenceLength = role === '基因定序師' ? 2 : 3;
+  const crossTypeLength = role === '跨域研究員' ? 2 : 3;
   for (const type of SAMPLE_TYPES) {
     const cards = samples.filter((sample) => sample.type === type.id && !sample.locked);
     const byRisk = new Map(cards.map((sample) => [sample.risk, sample]));
@@ -61,40 +67,44 @@ function eliminationCandidates(samples) {
       const run = [byRisk.get(risks[start])];
       for (let index = start + 1; index < risks.length && risks[index] === risks[index - 1] + 1; index += 1) {
         run.push(byRisk.get(risks[index]));
-        if (run.length >= 3) candidates.push([...run]);
+        if (run.length >= sequenceLength) candidates.push([...run]);
       }
     }
   }
   const risks = [...new Set(samples.map((sample) => sample.risk))];
   for (const risk of risks) {
-    const trio = SAMPLE_TYPES.map((type) => samples.find((sample) => sample.type === type.id && sample.risk === risk && !sample.locked));
-    if (trio.every(Boolean)) candidates.push(trio);
+    const matching = SAMPLE_TYPES.map((type) => samples.find((sample) => sample.type === type.id && sample.risk === risk && !sample.locked)).filter(Boolean);
+    if (matching.length >= crossTypeLength) {
+      if (crossTypeLength === 2) {
+        for (let left = 0; left < matching.length; left += 1) for (let right = left + 1; right < matching.length; right += 1) candidates.push([matching[left], matching[right]]);
+      } else candidates.push(matching);
+    }
   }
   return candidates;
 }
 
-function bestElimination(samples) {
-  const candidates = eliminationCandidates(samples);
-  let best = { saved: 0, ids: new Set() };
-  function search(index, used, saved) {
+function bestElimination(samples, role) {
+  const candidates = eliminationCandidates(samples, role);
+  let best = { saved: 0, ids: new Set(), groups: [] };
+  function search(index, used, saved, groups) {
     if (index === candidates.length) {
-      if (saved > best.saved) best = { saved, ids: new Set(used) };
+      if (saved > best.saved || (saved === best.saved && groups.length > best.groups.length)) best = { saved, ids: new Set(used), groups: [...groups] };
       return;
     }
-    search(index + 1, used, saved);
+    search(index + 1, used, saved, groups);
     const candidate = candidates[index];
     if (candidate.some((sample) => used.has(sample.id))) return;
     const next = new Set(used);
     candidate.forEach((sample) => next.add(sample.id));
-    search(index + 1, next, saved + candidate.reduce((sum, sample) => sum + sample.risk, 0));
+    search(index + 1, next, saved + candidate.reduce((sum, sample) => sum + sample.risk, 0), [...groups, candidate]);
   }
-  search(0, new Set(), 0);
+  search(0, new Set(), 0, []);
   return best;
 }
 
 function calculateScore(player) {
   const totalRisk = player.samples.reduce((sum, sample) => sum + sample.risk, 0);
-  return player.resources - totalRisk + bestElimination(player.samples).saved;
+  return player.resources - totalRisk + bestElimination(player.samples, player.role).saved;
 }
 
 function publicSample(sample, marketIsActive = false) {
@@ -105,7 +115,7 @@ function publicSample(sample, marketIsActive = false) {
 }
 
 function playerView(player) {
-  const eliminated = bestElimination(player.samples).ids;
+  const eliminated = bestElimination(player.samples, player.role).ids;
   return {
     id: player.id,
     name: player.name,
@@ -173,6 +183,13 @@ function identityView(playerId) {
   return { role: player.role, faction: player.faction, confirmed: player.confirmed, allies: player.faction === 'evil' ? Object.values(state.players).filter((item) => item.faction === 'evil' && item.id !== playerId).map((item) => item.name) : [] };
 }
 
+function previewView(playerId) {
+  const player = state.players[playerId];
+  if (!player) throw new Error('找不到玩家。');
+  if (player.role !== '流行病學專家' || !player.nextPreview) return { preview: null };
+  return { preview: { ...player.nextPreview } };
+}
+
 function broadcast() {
   const message = `data: ${JSON.stringify(publicState())}\n\n`;
   for (const response of clients) response.write(message);
@@ -198,6 +215,9 @@ function startRound() {
   state.markets = drawSamples(5).map((sample, index) => ({
     id: index + 1, sample, pot: 0, status: 'active', winnerId: null,
   }));
+  ensureDeck(5);
+  const nextRoundPreview = state.deck[state.deck.length - 1];
+  Object.values(state.players).forEach((player) => { player.nextPreview = player.role === '流行病學專家' ? { ...nextRoundPreview } : null; });
   state.notice = `第 ${state.round} 輪開市：請決定五個市場中想收容的樣本。${dueEffects.length ? ` ${dueEffects.length} 項延遲異常已計入失控指數。` : ''}`;
 }
 
@@ -230,6 +250,11 @@ function resolveMarketPass() {
       const winner = state.players[winnerId];
       applyCollectionEffects(winner, market.sample);
       winner.samples.push(market.sample);
+      if (winner.role === '疫苗開發員') {
+        const elimination = bestElimination(winner.samples, winner.role);
+        const completedGroups = elimination.groups.filter((group) => group.some((sample) => sample.id === market.sample.id)).length;
+        if (completedGroups) winner.resources += completedGroups * 4;
+      }
       winner.resources += market.pot;
       if (winner.role === '緊急應變員' && !winner.roundCollected) winner.resources += 2;
       winner.roundCollected = true;
@@ -347,7 +372,7 @@ function removePlayer(playerId) {
 function finalizeGame() {
   if (state.phase === 'active') throw new Error('請先完成目前所有市場。');
   if (state.phase === 'lobby' || state.phase === 'identity') throw new Error('遊戲尚未開始。');
-  const highRisk = Object.values(state.players).reduce((sum, player) => sum + player.samples.filter((sample) => !bestElimination(player.samples).ids.has(sample.id) && sample.risk >= 15).length, 0);
+  const highRisk = Object.values(state.players).reduce((sum, player) => sum + player.samples.filter((sample) => !bestElimination(player.samples, player.role).ids.has(sample.id) && sample.risk >= 15).length, 0);
   state.outbreak += highRisk;
   const winningFaction = state.outbreak >= 10 ? 'evil' : 'good';
   const scores = Object.values(state.players).map((player) => {
@@ -381,6 +406,7 @@ const server = http.createServer(async (request, response) => {
     if (url.pathname === '/api/state') return json(response, 200, publicState());
     if (url.pathname === '/api/host/state') { requireHost(request); return json(response, 200, hostState()); }
     if (request.method === 'POST' && url.pathname === '/api/identity') { const { playerId } = await readBody(request); return json(response, 200, identityView(playerId)); }
+    if (request.method === 'POST' && url.pathname === '/api/preview') { const { playerId } = await readBody(request); return json(response, 200, previewView(playerId)); }
     if (request.method === 'POST' && url.pathname === '/api/join') {
       if (state.phase !== 'lobby') throw new Error('遊戲已開始，請等待下一場收容協議。');
       const { name } = await readBody(request); const clean = String(name || '').trim().slice(0, 16);
@@ -408,7 +434,7 @@ const server = http.createServer(async (request, response) => {
     const file = path.normalize(path.join(PUBLIC, filename));
     if (!file.startsWith(PUBLIC)) return json(response, 403, { error: '禁止存取' });
     let data = fs.readFileSync(file);
-    if (filename === 'player.html') data = Buffer.from(data.toString().replace('</body>', '<script src="/identity.js"></script><script src="/report.js"></script><script src="/skills.js"></script></body>'));
+    if (filename === 'player.html') data = Buffer.from(data.toString().replace('</body>', '<script src="/identity.js"></script><script src="/report.js"></script><script src="/skills.js"></script><script src="/preview.js"></script></body>'));
     if (filename === 'host.html') data = Buffer.from(data.toString().replace('</body>', '<script src="/host-monitor.js"></script></body>'));
     const types = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
     response.writeHead(200, { 'Content-Type': types[path.extname(file)] || 'application/octet-stream' }); response.end(data);
@@ -416,4 +442,4 @@ const server = http.createServer(async (request, response) => {
 });
 
 if (require.main === module) server.listen(PORT, '0.0.0.0', () => console.log(`P.A.N.D.E.M.I.C. running on http://localhost:${PORT}`));
-module.exports = { state, calculateScore, startRound, submitActions, resetGame, bestElimination, confirmIdentity, finalizeGame, configureGame, useSkill, removePlayer };
+module.exports = { state, calculateScore, startRound, submitActions, resetGame, bestElimination, confirmIdentity, finalizeGame, configureGame, useSkill, removePlayer, previewView };
