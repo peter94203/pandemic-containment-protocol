@@ -2,7 +2,7 @@
   const box = document.createElement('div');
   box.className = 'decision'; box.style.marginTop = '16px';
   document.querySelector('#game')?.appendChild(box);
-  let identity = null, sentRound = 0;
+  let identity = null, sentRound = 0, previousPhase = '';
   async function identityFor(playerId) {
     const response = await fetch('/api/identity',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({playerId})});
     return response.ok ? response.json() : null;
@@ -10,7 +10,8 @@
   const events = new EventSource('/events');
   events.onmessage = async (event) => {
     const state = JSON.parse(event.data), playerId = localStorage.getItem('pandemic-player-id');
-    if (!playerId || state.phase === 'lobby') { box.hidden = true; return; }
+    if (!playerId || state.phase === 'lobby') { box.hidden = true; previousPhase = state.phase; return; }
+    if (state.phase !== previousPhase) { if (state.phase === 'identity') identity = null; previousPhase = state.phase; }
     if (!identity) identity = await identityFor(playerId);
     const me = state.players.find((player) => player.id === playerId);
     if (!identity || identity.faction !== 'good' || !me || state.round < 2 || state.phase !== 'active' || sentRound === state.round) { box.hidden = true; return; }

@@ -12,6 +12,7 @@
   };
   let identity = null;
   let lastState = null;
+  let previousPhase = '';
   async function getIdentity() {
     const playerId = localStorage.getItem('pandemic-player-id');
     if (!playerId) return null;
@@ -20,17 +21,22 @@
   }
   async function render() {
     if (lastState?.phase === 'lobby') { panel.hidden = true; return; }
+    if (lastState?.phase !== previousPhase) {
+      if (lastState?.phase === 'identity') identity = null;
+      previousPhase = lastState?.phase;
+    }
     if (!identity) identity = await getIdentity();
     const active = lastState?.phase === 'active' ? lastState.markets.filter((market) => market.status === 'active') : [];
     const isFakeSetup = identity?.role === '假情報員' && lastState?.phase === 'between';
-    if (!identity || identity.faction !== 'evil' || (!active.length && !isFakeSetup)) { panel.hidden = true; return; }
+    const isFake = identity?.role === '假情報員';
+    if (!identity || identity.faction !== 'evil' || (isFake && !isFakeSetup) || (!isFake && !active.length)) { panel.hidden = true; return; }
     panel.hidden = false;
-    const choices = isFakeSetup ? [1,2,3,4,5].map((slot) => `<button class="choice" data-market="${slot}">偽造下回合市場 ${String.fromCharCode(64 + slot)}</button>`).join('') : active.map((market) => `<button class="choice" data-market="${market.id}">對市場 ${String.fromCharCode(64 + market.id)} 使用技能</button>`).join('');
+    const choices = isFakeSetup ? (identity.pendingHiddenSlot ? `<p class="waiting">已選擇下回合市場 ${String.fromCharCode(64 + identity.pendingHiddenSlot)}，等待主持人開市。</p>` : [1,2,3,4,5].map((slot) => `<button class="choice" data-market="${slot}">偽造下回合市場 ${String.fromCharCode(64 + slot)}</button>`).join('')) : active.map((market) => `<button class="choice" data-market="${market.id}">對市場 ${String.fromCharCode(64 + market.id)} 使用技能</button>`).join('');
     panel.innerHTML = `<h3>隱密行動｜${identity.role}</h3><p>${descriptions[identity.role] || ''}</p>${choices}`;
     panel.querySelectorAll('[data-market]').forEach((button) => { button.onclick = async () => {
       const playerId = localStorage.getItem('pandemic-player-id');
       const response = await fetch('/api/skill', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({playerId, marketId:button.dataset.market}) });
-      if (!response.ok) alert((await response.json()).error || '技能未能使用');
+      if (!response.ok) alert((await response.json()).error || '技能未能使用'); else { identity = await getIdentity(); render(); }
     }; });
   }
   const events = new EventSource('/events');

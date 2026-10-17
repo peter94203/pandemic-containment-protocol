@@ -186,7 +186,7 @@ function hostState() {
 function identityView(playerId) {
   const player = state.players[playerId];
   if (!player) throw new Error('找不到玩家。');
-  return { role: player.role, faction: player.faction, confirmed: player.confirmed, allies: player.faction === 'evil' ? Object.values(state.players).filter((item) => item.faction === 'evil' && item.id !== playerId).map((item) => item.name) : [] };
+  return { role: player.role, faction: player.faction, confirmed: player.confirmed, pendingHiddenSlot: player.pendingHiddenSlot || null, allies: player.faction === 'evil' ? Object.values(state.players).filter((item) => item.faction === 'evil' && item.id !== playerId).map((item) => item.name) : [] };
 }
 
 function previewView(playerId) {
@@ -372,6 +372,7 @@ function useSkill(playerId, marketId) {
   if (player.role === '假情報員' && state.phase === 'between') {
     const slot = Number(marketId);
     if (!Number.isInteger(slot) || slot < 1 || slot > 5) throw new Error('請選擇下回合的 A～E 市場。');
+    if (player.pendingHiddenSlot) throw new Error('你已預先偽造一個下回合市場，請等待下一回合開市。');
     player.skillUses = player.skillUses || 0;
     if (player.skillUses >= 3) throw new Error('技能次數已用完。');
     player.pendingHiddenSlot = slot;
