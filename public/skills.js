@@ -3,7 +3,7 @@
   panel.className = 'decision'; panel.style.marginTop = '16px';
   document.querySelector('#game')?.appendChild(panel);
   const descriptions = {
-    '變異工程師':'每局 5 次：選一張樣本 +6，且不能減傷。','黑市走私商':'每局 3 次：從下回合預覽的兩張樣本中秘密標記一張。','內部破壞者':'每局 2 次：第一小回合啟用；若未全數收容，剩餘樣本 +20 且不可減傷、不可消除。','假情報員':'每局 4 次：預先偽造下回合一個病原體分配所的種類與編號。','失控宿主':'每局 3 次：秘密鎖定一張樣本；收容後才會揭露不可消除。',
+    '變異工程師':'每局 5 次：選一張樣本 +6，且不能減傷。','黑市走私商':'每局 3 次：從下回合預覽的兩張樣本中秘密標記一張。','內部破壞者':'每局 2 次：第一小回合啟用；若未全數收容，剩餘樣本 +20 且不可減傷、不可消除。','假情報員':'每局 4 次：預先偽造下回合一個病原體分配所的種類、編號與危險係數。','失控宿主':'每局 3 次：秘密鎖定一張樣本；收容後才會揭露不可消除。',
   };
   let identity=null,lastState=null,previousPhase='';
   async function getIdentity(){const playerId=localStorage.getItem('pandemic-player-id');if(!playerId)return null;const r=await fetch('/api/identity',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({playerId})});return r.ok?r.json():null;}

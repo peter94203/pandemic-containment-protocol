@@ -47,7 +47,7 @@ function buildDeck() {
   return shuffle(SAMPLE_TYPES.flatMap((type) => Array.from({ length: state.config.samplesPerType }, (_, index) => ({
     id: crypto.randomUUID(), type: type.id, typeLabel: type.label,
     code: `${type.prefix}-${String(index + 1).padStart(2, '0')}`,
-    risk: index + 1, baseRisk: index + 1,
+    risk: index + 1, baseRisk: index + 1, sequenceRisk: index + 1,
   }))));
 }
 
@@ -67,7 +67,8 @@ function eliminationCandidates(samples, role) {
   const crossTypeLength = role === '跨域研究員' ? 2 : 3;
   for (const type of SAMPLE_TYPES) {
     const cards = samples.filter((sample) => sample.type === type.id && !sample.locked);
-    const byRisk = new Map(cards.map((sample) => [sample.risk, sample]));
+    // 消除看的是樣本原始編號；減傷與變異只改變實際扣分，不改變連號／同數字判定。
+    const byRisk = new Map(cards.map((sample) => [sample.sequenceRisk ?? sample.baseRisk ?? sample.risk, sample]));
     const risks = [...byRisk.keys()].sort((a, b) => a - b);
     for (let start = 0; start < risks.length; start += 1) {
       const run = [byRisk.get(risks[start])];
@@ -77,9 +78,9 @@ function eliminationCandidates(samples, role) {
       }
     }
   }
-  const risks = [...new Set(samples.map((sample) => sample.risk))];
+  const risks = [...new Set(samples.map((sample) => sample.sequenceRisk ?? sample.baseRisk ?? sample.risk))];
   for (const risk of risks) {
-    const matching = SAMPLE_TYPES.map((type) => samples.find((sample) => sample.type === type.id && sample.risk === risk && !sample.locked)).filter(Boolean);
+    const matching = SAMPLE_TYPES.map((type) => samples.find((sample) => sample.type === type.id && (sample.sequenceRisk ?? sample.baseRisk ?? sample.risk) === risk && !sample.locked)).filter(Boolean);
     if (matching.length >= crossTypeLength) {
       if (crossTypeLength === 2) {
         for (let left = 0; left < matching.length; left += 1) for (let right = left + 1; right < matching.length; right += 1) candidates.push([matching[left], matching[right]]);
@@ -148,7 +149,7 @@ function endgameAdjustment(player) {
 function publicSample(sample, marketIsActive = false) {
   const visible = { ...sample };
   if (marketIsActive && visible.hostLock) { delete visible.locked; delete visible.hostLock; }
-  if (marketIsActive && visible.hiddenType) return { ...visible, type: 'unknown', typeLabel: '未知', code: 'CLASSIFIED' };
+  if (marketIsActive && visible.hiddenType) return { id: visible.id, type: 'unknown', typeLabel: '機密', code: 'CLASSIFIED', risk: null, hiddenType: true };
   return visible;
 }
 
@@ -360,7 +361,7 @@ function resolveMarketPass() {
   }
   if (state.sabotageArmedBy && firstPass && state.markets.some((market) => market.status === 'active')) {
     state.markets.filter((market) => market.status === 'active').forEach((market) => {
-      market.sample.risk += 20; market.sample.baseRisk += 20; market.sample.noReduction = true; market.sample.locked = true; market.sample.sabotaged = true;
+      market.sample.risk += 20; market.sample.noReduction = true; market.sample.locked = true; market.sample.sabotaged = true;
     });
     outcomes.push('內部破壞生效：未收容樣本 +20，且不可減傷、不可消除');
   }
@@ -465,7 +466,7 @@ function useSkill(playerId, marketId) {
   player.skillUses = player.skillUses || 0;
   const limits = { '變異工程師': 5, '黑市走私商': 3, '內部破壞者': 2, '假情報員': 4, '失控宿主': 3 };
   if (player.skillUses >= limits[player.role]) throw new Error('技能次數已用完。');
-  if (player.role === '變異工程師') { market.sample.risk += 6; market.sample.baseRisk += 6; market.sample.noReduction = true; market.sample.reductionNote = '變異：禁止減傷'; }
+  if (player.role === '變異工程師') { market.sample.risk += 6; market.sample.noReduction = true; market.sample.reductionNote = '變異：禁止減傷'; }
   if (player.role === '黑市走私商') throw new Error('走私商請在本回合結束後標記下回合預覽樣本。');
   if (player.role === '內部破壞者') {
     if (!state.markets.every((item) => item.pot === 0)) throw new Error('內部破壞只能在第一小回合啟用。');
