@@ -12,7 +12,7 @@ const SAMPLE_TYPES = [
   { id: 'bacteria', label: '細菌', prefix: 'B' },
   { id: 'parasite', label: '寄生蟲', prefix: 'P' },
 ];
-const GOOD_ROLES = ['病毒專家','細菌專家','寄生蟲專家','免疫學家','研發天才','基因定序師','疫苗開發員','收容指揮官','生物安全官','流行病學專家','跨域研究員','緊急應變員','病原體獵人'];
+const GOOD_ROLES = ['病毒專家','細菌專家','寄生蟲專家','免疫學家','研發天才','基因定序師','疫苗開發員','收容指揮官','生物安全官','流行病學專家','緊急應變員','病原體獵人'];
 const EVIL_ROLES = ['變異工程師','黑市走私商','內部破壞者','假情報員','失控宿主'];
 
 const state = {
@@ -27,6 +27,7 @@ const state = {
   outbreakEvents: [],
   result: null,
   delayedEffects: [],
+  evilMessages: [],
   revealAnnouncement: null,
   config: { samplesPerType: 25, decisionSeconds: 60 },
   decisionDeadline: null,
@@ -56,7 +57,7 @@ function drawSamples(count) {
   const drawCount = Math.min(count, state.deck.length);
   return Array.from({ length: drawCount }, () => {
     const sample = state.deck.pop();
-    if (sample.risk > 15 && Math.random() < 0.2) sample.naturalMutation = true;
+    if (sample.risk > 15 && Math.random() < 0.3) sample.naturalMutation = true;
     return sample;
   });
 }
@@ -64,7 +65,7 @@ function drawSamples(count) {
 function eliminationCandidates(samples, role) {
   const candidates = [];
   const sequenceLength = role === '基因定序師' ? 2 : 3;
-  const crossTypeLength = role === '跨域研究員' ? 2 : 3;
+  const crossTypeLength = 3;
   for (const type of SAMPLE_TYPES) {
     const cards = samples.filter((sample) => sample.type === type.id && !sample.locked);
     // 消除看的是樣本原始編號；減傷與變異只改變實際扣分，不改變連號／同數字判定。
@@ -206,8 +207,8 @@ function assignRoles() {
     player.role = index < evilCount
       ? evilRoles[index % evilRoles.length]
       : goodRoles[(index - evilCount) % goodRoles.length];
-    player.reports = 0; player.revealed = false; player.reportUsedRound = 0; player.confirmed = false; player.skillUses = 0; player.skillUsedRound = null;
-    player.roundCollected = false; player.roundVirusCollected = 0; player.totalAcquired = 0; player.achievements = [];
+    player.reports = 0; player.reportUses = 0; player.revealed = false; player.reportUsedRound = 0; player.confirmed = false; player.skillUses = 0; player.skillUsedRound = null;
+    player.roundCollected = false; player.roundReceivedCount = 0; player.roundNaturalMutationCollected = 0; player.totalAcquired = 0; player.achievements = [];
   });
 }
 
@@ -226,7 +227,23 @@ function hostState() {
 function identityView(playerId) {
   const player = state.players[playerId];
   if (!player) throw new Error('找不到玩家。');
-  return { role: player.role, faction: player.faction, confirmed: player.confirmed, pendingHiddenSlot: player.pendingHiddenSlot || null, pendingSmuggledSampleId: player.pendingSmuggledSampleId || null, smugglerPreview: player.nextSmugglerPreview || [], allies: player.faction === 'evil' ? Object.values(state.players).filter((item) => item.faction === 'evil' && item.id !== playerId).map((item) => item.name) : [] };
+  return { role: player.role, faction: player.faction, confirmed: player.confirmed, revealed: player.revealed, reportUses: player.reportUses || 0, pendingHiddenAll: Boolean(player.pendingHiddenAll), pendingSmuggledSampleId: player.pendingSmuggledSampleId || null, smugglerPreview: player.nextSmugglerPreview || [], allies: player.faction === 'evil' ? Object.values(state.players).filter((item) => item.faction === 'evil' && item.id !== playerId).map((item) => item.name) : [], evilMessages: player.faction === 'evil' ? (state.evilMessages || []) : [] };
+}
+
+const EVIL_QUICK_MESSAGES = [
+  '我這一輪要拿 A', '我這一輪要拿 B', '我這一輪要拿 C', '我這一輪要拿 D', '我這一輪要拿 E',
+  '我這一輪有使用技能', '我技能次數用完了', '我還有技能次數',
+];
+
+function sendEvilQuickMessage(playerId, messageIndex) {
+  const player = state.players[playerId];
+  const text = EVIL_QUICK_MESSAGES[Number(messageIndex)];
+  if (!player) throw new Error('找不到玩家，請重新加入。');
+  if (player.faction !== 'evil') throw new Error('只有狂人陣營可使用內部通訊。');
+  if (!text) throw new Error('無效的快捷訊息。');
+  if (state.phase === 'lobby' || state.phase === 'final') throw new Error('目前無法使用內部通訊。');
+  state.evilMessages = [...(state.evilMessages || []), { id: crypto.randomUUID(), playerId, name: player.name, role: player.role, text, round: state.round, createdAt: Date.now() }].slice(-50);
+  state.notice = '狂人陣營內部通訊已更新。';
 }
 
 function previewView(playerId) {
@@ -276,16 +293,15 @@ function startRound() {
   const dueEffects = (state.delayedEffects || []).filter((effect) => effect.dueRound <= state.round);
   dueEffects.forEach((effect) => { changeOutbreak(effect.amount, `延遲異常：${state.players[effect.sourceId]?.name || '未知來源'}`); });
   state.delayedEffects = (state.delayedEffects || []).filter((effect) => effect.dueRound > state.round);
-  Object.values(state.players).forEach((player) => { player.roundCollected = false; player.roundVirusCollected = 0; });
+  Object.values(state.players).forEach((player) => { player.roundCollected = false; player.roundReceivedCount = 0; player.roundNaturalMutationCollected = 0; });
   state.phase = 'active';
   state.submissions = {};
   state.markets = drawSamples(5).map((sample, index) => ({
     id: index + 1, sample, pot: 0, status: 'active', winnerId: null,
   }));
-  Object.values(state.players).filter((player) => player.role === '假情報員' && player.pendingHiddenSlot).forEach((player) => {
-    const target = state.markets.find((market) => market.id === player.pendingHiddenSlot);
-    if (target) target.sample.hiddenType = true;
-    player.pendingHiddenSlot = null;
+  Object.values(state.players).filter((player) => player.role === '假情報員' && player.pendingHiddenAll).forEach((player) => {
+    state.markets.forEach((market) => { market.sample.hiddenType = true; });
+    player.pendingHiddenAll = false;
   });
   Object.values(state.players).filter((player) => player.role === '黑市走私商' && player.pendingSmuggledSampleId).forEach((player) => {
     const target = state.markets.find((market) => market.sample.id === player.pendingSmuggledSampleId);
@@ -319,56 +335,69 @@ function resolveMarketPass() {
   clearDecisionTimer();
   const outcomes = [];
   const firstPass = state.markets.every((market) => market.pot === 0);
+  // A→E 依序判定；同一玩家在一個大回合最多收容兩份樣本。
   for (const market of state.markets.filter((item) => item.status === 'active')) {
     const applicants = Object.entries(state.submissions)
-      .filter(([, actions]) => actions[market.id] === 'accept')
+      .filter(([playerId, actions]) => actions[market.id] === 'accept' && (state.players[playerId].roundReceivedCount || 0) < 2)
       .map(([id]) => id);
     if (applicants.length) {
       const winnerId = selectWinner(applicants);
       const winner = state.players[winnerId];
       applyCollectionEffects(winner, market.sample);
       winner.samples.push(market.sample);
+      winner.roundReceivedCount = (winner.roundReceivedCount || 0) + 1;
       winner.totalAcquired = (winner.totalAcquired || 0) + 1;
-      if (market.sample.type === 'virus') {
-        winner.roundVirusCollected = (winner.roundVirusCollected || 0) + 1;
-        if (winner.roundVirusCollected >= 2 && !(winner.achievements || []).some((item) => item.id === 'double-virus')) {
+      if (market.sample.naturalMutation) {
+        winner.roundNaturalMutationCollected = (winner.roundNaturalMutationCollected || 0) + 1;
+        if (winner.roundNaturalMutationCollected >= 2 && !(winner.achievements || []).some((item) => item.id === 'double-natural-mutation')) {
           winner.resources += 20;
-          winner.achievements = [...(winner.achievements || []), { id: 'double-virus', title: '病毒雙重收容', points: 20, round: state.round }];
-          outcomes.push(`${winner.name} 達成「病毒雙重收容」：隔離點數 +20`);
+          winner.achievements = [...(winner.achievements || []), { id: 'double-natural-mutation', title: '突變雙重收容', points: 20, round: state.round }];
+          outcomes.push(`${winner.name} 達成「突變雙重收容」：隔離點數 +20`);
         }
       }
       if (winner.role === '疫苗開發員') {
         const elimination = bestElimination(winner.samples, winner.role);
         const completedGroups = elimination.groups.filter((group) => group.some((sample) => sample.id === market.sample.id)).length;
-        if (completedGroups) winner.resources += completedGroups * 5;
+        if (completedGroups) winner.resources += completedGroups * 4;
       }
       winner.resources += market.pot;
-      if (winner.role === '緊急應變員' && !winner.roundCollected) winner.resources += 2;
+      if (winner.role === '緊急應變員' && !winner.roundCollected) winner.resources += 1;
       winner.roundCollected = true;
       market.status = 'sold';
       market.winnerId = winnerId;
       outcomes.push(`${winner.name} 收容 ${market.sample.code}`);
       if (market.smuggledBy && firstPass) { changeOutbreak(1, `黑市走私標記：${market.sample.code} 在首輪被收容`); state.players[market.smuggledBy].resources += 2; outcomes.push('走私標記在首輪成功流入，失控 +1'); }
-    } else {
-      Object.values(state.players).forEach((player) => { if (!(player.role === '生物安全官' && player.safetyUsedRound !== state.round)) { player.resources -= 1; } else player.safetyUsedRound = state.round; });
-      market.pot += Object.keys(state.players).length;
+    }
+  }
+  const unsoldMarkets = state.markets.filter((market) => market.status === 'active');
+  if (unsoldMarkets.length) {
+    let deducted = 0;
+    Object.values(state.players).filter((player) => (player.roundReceivedCount || 0) === 0).forEach((player) => {
+      if (player.role === '生物安全官' && player.safetyUsedRound !== state.round) player.safetyUsedRound = state.round;
+      else { player.resources -= 1; deducted += 1; }
+    });
+    const each = Math.floor(deducted / unsoldMarkets.length);
+    const remainder = deducted % unsoldMarkets.length;
+    unsoldMarkets.forEach((market, index) => {
+      market.pot += each + (index < remainder ? 1 : 0);
       market.uncollectedPasses = (market.uncollectedPasses || 0) + 1;
-      const chance = market.uncollectedPasses === 1 ? 0.2 : market.uncollectedPasses === 2 ? 0.4 : 0.8;
+      const chance = market.uncollectedPasses === 1 ? 0.3 : market.uncollectedPasses === 2 ? 0.6 : 0.9;
       if (Math.random() < chance) changeOutbreak(1, `${market.sample.code} 第 ${market.uncollectedPasses} 小回合滯留病原體分配所（${Math.round(chance * 100)}% 失控檢定）`);
       if (market.sample.naturalMutation) changeOutbreak(1, `天然突變樣本 ${market.sample.code} 未在本小回合收容`);
-      outcomes.push(`${market.sample.code} 無人收容，拒絕池累積至 ${market.pot}；滯留失控檢定 ${Math.round(chance * 100)}%${market.sample.naturalMutation ? '；天然突變樣本額外造成失控' : ''}`);
-    }
+      outcomes.push(`${market.sample.code} 未分配，拒絕池累積至 ${market.pot}；滯留失控檢定 ${Math.round(chance * 100)}%${market.sample.naturalMutation ? '；天然突變樣本額外造成失控' : ''}`);
+    });
+    if (deducted) outcomes.push(`${deducted} 點隔離點數已依 A→E 順序平均分入滯留分配所`);
   }
   if (state.sabotageArmedBy && firstPass && state.markets.some((market) => market.status === 'active')) {
     state.markets.filter((market) => market.status === 'active').forEach((market) => {
-      market.sample.risk += 20; market.sample.noReduction = true; market.sample.locked = true; market.sample.sabotaged = true;
+      market.sample.risk += 30; market.sample.noReduction = true; market.sample.locked = true; market.sample.sabotaged = true;
     });
-    outcomes.push('內部破壞生效：未收容樣本 +20，且不可減傷、不可消除');
+    outcomes.push('內部破壞生效：未收容樣本 +30，且不可減傷、不可消除');
   }
   if (firstPass) state.sabotageArmedBy = null;
   state.submissions = {};
   if (state.markets.every((market) => market.status === 'sold')) {
-    if (firstPass) changeOutbreak(-5, '五張樣本皆在第一小回合完成收容');
+    if (firstPass) changeOutbreak(-1, '五張樣本皆在第一小回合完成收容');
     const evilWins = state.markets.filter((market) => state.players[market.winnerId].faction === 'evil').length;
     if (evilWins >= 2) changeOutbreak(1, `本大輪有 ${evilWins} 張樣本由狂人陣營收容`);
     if (state.deck.length === 0) { state.phase = 'between'; finalizeGame(); return; }
@@ -397,10 +426,10 @@ function applyCollectionEffects(player, sample) {
   // 收容時固定危險係數；被變異或破壞的樣本不能再減傷。
   if (sample.noReduction) return;
   let reduction = 0;
-  if ((player.role === '病毒專家' && sample.type === 'virus') || (player.role === '細菌專家' && sample.type === 'bacteria') || (player.role === '寄生蟲專家' && sample.type === 'parasite')) reduction += 5;
+  if ((player.role === '病毒專家' && sample.type === 'virus') || (player.role === '細菌專家' && sample.type === 'bacteria') || (player.role === '寄生蟲專家' && sample.type === 'parasite')) reduction += 4;
   if (player.role === '免疫學家') reduction += 2;
   if (player.role === '病原體獵人' && sample.risk > 15) reduction += 5;
-  if (player.role === '研發天才' && Math.random() < 0.2) { sample.risk = 0; sample.reductionNote = '研發天才：風險歸零'; return; }
+  if (player.role === '研發天才' && Math.random() < 0.3) { sample.risk = 0; sample.reductionNote = '研發天才：風險歸零'; return; }
   if (reduction) { sample.risk = Math.max(0, sample.risk - reduction); sample.reductionNote = `角色減傷 −${reduction}`; }
 }
 
@@ -410,7 +439,10 @@ function reportPlayer(reporterId, targetId) {
   if (state.round < 2 || reporter.faction !== 'good') throw new Error('目前無法使用舉報。');
   if (reporter.reportUsedRound === state.round) throw new Error('每回合只能舉報一次。');
   if (target.revealed) throw new Error('該玩家已公開陣營。');
-  reporter.reportUsedRound = state.round; target.reports += 1;
+  reporter.reportUsedRound = state.round;
+  reporter.reportUses = (reporter.reportUses || 0) + 1;
+  reporter.resources -= reporter.reportUses;
+  target.reports += 1;
   if (target.reports >= 9) {
     target.revealed = true;
     const change = target.faction === 'evil' ? -8 : 4;
@@ -437,14 +469,13 @@ function useSkill(playerId, marketId) {
   const player = state.players[playerId];
   if (!player) throw new Error('找不到你的實驗室，請重新登入。');
   if (player.faction !== 'evil') throw new Error('只有狂人陣營可使用隱密行動。');
+  if (player.revealed) throw new Error('你的陣營已公開，所有隱密技能均已失效。');
   if (player.skillUsedRound === state.round) throw new Error('每一大回合最多只能使用一次技能。');
   if (player.role === '假情報員' && state.phase === 'between') {
-    const slot = Number(marketId);
-    if (!Number.isInteger(slot) || slot < 1 || slot > 5) throw new Error('請選擇下回合的 A～E 病原體分配所。');
-    if (player.pendingHiddenSlot) throw new Error('你已預先偽造一個下回合病原體分配所，請等待下一回合開啟。');
+    if (player.pendingHiddenAll) throw new Error('你已預先偽造下一回合全部病原體分配所，請等待下一回合開啟。');
     player.skillUses = player.skillUses || 0;
-    if (player.skillUses >= 4) throw new Error('技能次數已用完。');
-    player.pendingHiddenSlot = slot;
+    if (player.skillUses >= 2) throw new Error('技能次數已用完。');
+    player.pendingHiddenAll = true;
     player.skillUses += 1; player.skillUsedRound = state.round;
     state.notice = '病原體分配所偵測到異常操作。';
     return;
@@ -464,9 +495,9 @@ function useSkill(playerId, marketId) {
   const market = state.markets.find((item) => item.id === Number(marketId) && item.status === 'active');
   if (!market) throw new Error('這個病原體分配所已結算，請選擇仍在開放中的病原體分配所。');
   player.skillUses = player.skillUses || 0;
-  const limits = { '變異工程師': 5, '黑市走私商': 3, '內部破壞者': 2, '假情報員': 4, '失控宿主': 3 };
+  const limits = { '變異工程師': 5, '黑市走私商': 3, '內部破壞者': 2, '假情報員': 2, '失控宿主': 4 };
   if (player.skillUses >= limits[player.role]) throw new Error('技能次數已用完。');
-  if (player.role === '變異工程師') { market.sample.risk += 6; market.sample.noReduction = true; market.sample.reductionNote = '變異：禁止減傷'; }
+  if (player.role === '變異工程師') { market.sample.risk += 10; market.sample.noReduction = true; market.sample.reductionNote = '變異：禁止減傷'; }
   if (player.role === '黑市走私商') throw new Error('走私商請在本回合結束後標記下回合預覽樣本。');
   if (player.role === '內部破壞者') {
     if (!state.markets.every((item) => item.pot === 0)) throw new Error('內部破壞只能在第一小回合啟用。');
@@ -480,8 +511,8 @@ function useSkill(playerId, marketId) {
 
 function resetGame() {
   clearDecisionTimer();
-  Object.values(state.players).forEach((player) => { player.resources = 8; player.samples = []; player.role = null; player.faction = 'good'; player.reports = 0; player.revealed = false; player.confirmed = false; player.skillUses = 0; player.skillUsedRound = null; player.roundCollected = false; player.roundVirusCollected = 0; player.totalAcquired = 0; player.achievements = []; player.pendingHiddenSlot = null; player.pendingSmuggledSampleId = null; player.nextSmugglerPreview = null; });
-  state.round = 0; state.phase = 'lobby'; state.markets = []; state.deck = []; state.deckInitialized = false; state.submissions = {}; state.outbreak = 0; state.outbreakEvents = []; state.result = null; state.delayedEffects = []; state.sabotageArmedBy = null;
+  Object.values(state.players).forEach((player) => { player.resources = 8; player.samples = []; player.role = null; player.faction = 'good'; player.reports = 0; player.reportUses = 0; player.revealed = false; player.confirmed = false; player.skillUses = 0; player.skillUsedRound = null; player.roundCollected = false; player.roundReceivedCount = 0; player.roundNaturalMutationCollected = 0; player.totalAcquired = 0; player.achievements = []; player.pendingHiddenAll = false; player.pendingSmuggledSampleId = null; player.nextSmugglerPreview = null; });
+  state.round = 0; state.phase = 'lobby'; state.markets = []; state.deck = []; state.deckInitialized = false; state.submissions = {}; state.outbreak = 0; state.outbreakEvents = []; state.result = null; state.delayedEffects = []; state.evilMessages = []; state.sabotageArmedBy = null;
   state.revealAnnouncement = null;
   state.notice = '收容協議已重置，等待主持人啟動。';
 }
@@ -520,11 +551,11 @@ function finalizeGame(force = false) {
   const winningFaction = state.outbreak >= 10 ? 'evil' : 'good';
   const scores = Object.values(state.players).map((player) => {
     let bonus = 0;
-    if (player.faction === 'good' && winningFaction === 'good') bonus = 30;
-    if (player.faction === 'evil' && winningFaction === 'evil') bonus = player.reports < 3 ? 75 : player.reports < 9 ? 35 : 10;
+    if (player.faction === 'good' && winningFaction === 'good') bonus = 60;
+    if (player.faction === 'evil' && winningFaction === 'evil') bonus = 120 - ((player.reports || 0) * 10);
     const adjustment = endgameAdjustment(player);
     const achievements = [...(player.achievements || []), ...adjustment.achievements];
-    return { id: player.id, name: player.name, faction: player.faction, role: player.role, base: calculateScore(player), adjustment, achievements, bonus, total: calculateScore(player) + adjustment.total + bonus };
+    return { id: player.id, name: player.name, faction: player.faction, role: player.role, reports: player.reports || 0, base: calculateScore(player), adjustment, achievements, bonus, total: calculateScore(player) + adjustment.total + bonus };
   }).sort((a,b) => b.total - a.total);
   state.result = { winningFaction, scores };
   state.phase = 'final';
@@ -571,6 +602,7 @@ const server = http.createServer(async (request, response) => {
       const { playerId, targetId } = await readBody(request); reportPlayer(playerId, targetId); broadcast(); return json(response, 200, publicState());
     }
     if (request.method === 'POST' && url.pathname === '/api/skill') { const { playerId, marketId } = await readBody(request); useSkill(playerId, marketId); broadcast(); return json(response, 200, publicState()); }
+    if (request.method === 'POST' && url.pathname === '/api/evil-message') { const { playerId, messageIndex } = await readBody(request); sendEvilQuickMessage(playerId, messageIndex); broadcast(); return json(response, 200, { ok: true }); }
     if (request.method === 'POST' && url.pathname === '/api/host/start') { requireHost(request); startRound(); broadcast(); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/config') { requireHost(request); const { samplesPerType, decisionSeconds } = await readBody(request); configureGame(samplesPerType, decisionSeconds); broadcast(); return json(response, 200, publicState()); }
     if (request.method === 'POST' && url.pathname === '/api/host/force-resolve') { requireHost(request); forceMarketPass(); broadcast(); return json(response, 200, publicState()); }
@@ -582,7 +614,7 @@ const server = http.createServer(async (request, response) => {
     const file = path.normalize(path.join(PUBLIC, filename));
     if (!file.startsWith(PUBLIC)) return json(response, 403, { error: '禁止存取' });
     let data = fs.readFileSync(file);
-    if (filename === 'player.html') data = Buffer.from(data.toString().replace('</body>', '<script src="/identity.js"></script><script src="/report.js"></script><script src="/skills.js"></script><script src="/preview.js"></script></body>'));
+    if (filename === 'player.html') data = Buffer.from(data.toString().replace('</body>', '<script src="/identity.js"></script><script src="/report.js"></script><script src="/skills.js"></script><script src="/preview.js"></script><script src="/evil-chat.js"></script></body>'));
     if (filename === 'host.html') data = Buffer.from(data.toString().replace('</body>', '<script src="/host-monitor.js"></script></body>'));
     const types = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
     response.writeHead(200, { 'Content-Type': types[path.extname(file)] || 'application/octet-stream' }); response.end(data);
@@ -590,4 +622,4 @@ const server = http.createServer(async (request, response) => {
 });
 
 if (require.main === module) server.listen(PORT, '0.0.0.0', () => console.log(`P.A.N.D.E.M.I.C. running on http://localhost:${PORT}`));
-module.exports = { state, calculateScore, endgameAdjustment, startRound, submitActions, resetGame, bestElimination, confirmIdentity, finalizeGame, configureGame, useSkill, removePlayer, previewView, forceMarketPass };
+module.exports = { state, calculateScore, endgameAdjustment, startRound, submitActions, resetGame, bestElimination, confirmIdentity, finalizeGame, configureGame, useSkill, removePlayer, previewView, forceMarketPass, sendEvilQuickMessage };
